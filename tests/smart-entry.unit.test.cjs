@@ -549,3 +549,96 @@ describe('#2427 — roadmap-grounded completion + tightened status regex', () =>
       `legacy fallback must still reject completion when current_phase < total_phases. Got: ${result.situation}`);
   });
 });
+
+// ─── #2573: STATE.md commit-age freshness signal ─────────────────────────────
+
+describe('detectSignals — state_head commit-age freshness (#2573)', () => {
+  const { execSync } = require('child_process');
+
+  const dirs = [];
+  const track = (d) => { dirs.push(d); return d; };
+  afterEach(() => { while (dirs.length) cleanup(dirs.pop()); });
+
+  function gitProject(stateHead) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-se-'));
+    fs.mkdirSync(path.join(dir, '.planning'), { recursive: true });
+    execSync('git init -q', { cwd: dir, stdio: 'pipe' });
+    execSync('git config user.email "t@t.com"', { cwd: dir, stdio: 'pipe' });
+    execSync('git config user.name "T"', { cwd: dir, stdio: 'pipe' });
+    execSync('git config commit.gpgsign false', { cwd: dir, stdio: 'pipe' });
+    fs.writeFileSync(path.join(dir, 'seed.txt'), 'seed\n');
+    execSync('git add -A && git commit -q -m "seed"', { cwd: dir, stdio: 'pipe' });
+    const base = execSync('git rev-parse HEAD', { cwd: dir, encoding: 'utf-8' }).trim();
+
+    fs.writeFileSync(
+      path.join(dir, '.planning', 'STATE.md'),
+      [
+        '---',
+        'status: executing',
+        ...(stateHead === null ? [] : [`state_head: ${stateHead === 'BASE' ? base : stateHead}`]),
+        '---',
+        '',
+        '# Project State',
+        '',
+        'Phase: 1',
+        '',
+      ].join('\n'),
+    );
+    return { dir: track(dir), base };
+  }
+
+  function advance(dir, n) {
+    for (let i = 0; i < n; i++) {
+      fs.writeFileSync(path.join(dir, `c${i}.txt`), `${i}\n`);
+      execSync(`git add -A && git commit -q -m "c${i}"`, { cwd: dir, stdio: 'pipe' });
+    }
+  }
+
+  test('state_head at HEAD → commits_behind 0, commit_stale false (known fresh)', () => {
+    const { dir } = gitProject('BASE');
+    const s = detectSignals(dir);
+    assert.strictEqual(s.state_commits_behind, 0);
+    assert.strictEqual(s.state_commit_stale, false);
+  });
+
+  test('state_head N commits back → commits_behind N', () => {
+    const { dir } = gitProject('BASE');
+    advance(dir, 3);
+    const s = detectSignals(dir);
+    assert.strictEqual(s.state_commits_behind, 3,
+      'commits_behind must count commits between state_head and HEAD');
+    assert.strictEqual(s.state_commit_stale, true);
+  });
+
+  test('missing state_head → tri-state null ("we don\'t know"), NOT false', () => {
+    // Mirrors graphify's shipped commit_stale contract (src/graphify.cts:446):
+    // null = unknown, distinct from false = known fresh. Collapsing unknown to
+    // false would assert freshness the engine cannot actually vouch for.
+    const { dir } = gitProject(null);
+    const s = detectSignals(dir);
+    assert.strictEqual(s.state_commits_behind, null);
+    assert.strictEqual(s.state_commit_stale, null);
+  });
+
+  test('malformed / unreachable state_head → null, never throws', () => {
+    for (const bad of ['not-a-sha', 'zzzz', 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef']) {
+      const { dir } = gitProject(bad);
+      let s;
+      assert.doesNotThrow(() => { s = detectSignals(dir); }, `${bad} must not throw`);
+      assert.strictEqual(s.state_commits_behind, null, `${bad} → null`);
+      assert.strictEqual(s.state_commit_stale, null, `${bad} → null`);
+    }
+  });
+
+  test('non-git project → null (no signal), never throws', () => {
+    const dir = track(fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-nogit-')));
+    fs.mkdirSync(path.join(dir, '.planning'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.planning', 'STATE.md'),
+      ['---', 'status: executing', 'state_head: abc1234', '---', '', '# Project State', ''].join('\n'),
+    );
+    let s;
+    assert.doesNotThrow(() => { s = detectSignals(dir); });
+    assert.strictEqual(s.state_commit_stale, null);
+  });
+});

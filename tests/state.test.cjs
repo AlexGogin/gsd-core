@@ -11012,3 +11012,161 @@ describe('bug #2440 — shouldPreserveExistingProgress does not ratchet total_pl
 });
   });
 }
+
+// ─── #2573: state_head commit provenance on the write seam ───────────────────
+
+describe('syncStateFrontmatter — state_head commit provenance (#2573)', () => {
+  const { execSync } = require('child_process');
+  const { syncStateFrontmatter } = require('../gsd-core/bin/lib/state.cjs');
+  const { extractFrontmatter } = require('../gsd-core/bin/lib/frontmatter.cjs');
+  const { createTempGitProject: mkGit } = require('./helpers.cjs');
+
+  const dirs = [];
+  const track = (d) => { dirs.push(d); return d; };
+  afterEach(() => { while (dirs.length) cleanup(dirs.pop()); });
+
+  const MINIMAL_STATE = [
+    '---',
+    'status: executing',
+    '---',
+    '',
+    '# Session State',
+    '',
+    'Status: executing',
+    '',
+  ].join('\n');
+
+  test('stamps state_head with the full HEAD sha of the project repo', () => {
+    const dir = track(mkGit('gsd-2573-'));
+    const head = execSync('git rev-parse HEAD', { cwd: dir, encoding: 'utf-8' }).trim();
+
+    const synced = syncStateFrontmatter(MINIMAL_STATE, dir);
+    const fm = extractFrontmatter(synced);
+
+    assert.strictEqual(fm.state_head, head,
+      'state_head must record the commit STATE.md was written against');
+  });
+
+  test('omits state_head entirely when the project is not a git repo (degrade, never throw)', () => {
+    // trek-e's approval condition 3: degrade to no-signal rather than throwing
+    // when the commit is unresolvable. A non-repo is the canonical case.
+    const dir = track(createTempProject('gsd-2573-nogit-'));
+
+    let synced;
+    assert.doesNotThrow(() => { synced = syncStateFrontmatter(MINIMAL_STATE, dir); },
+      'a non-git project must not throw');
+    const fm = extractFrontmatter(synced);
+
+    assert.ok(!('state_head' in fm),
+      `state_head must be absent outside a git repo, got ${JSON.stringify(fm.state_head)}`);
+  });
+
+  test('restamps state_head to the new HEAD after a commit (freshness proxy resets on write)', () => {
+    // Goodhart guard, asserted rather than assumed: the counter resets as a
+    // side effect of ANY state write, so state_head means "written at this
+    // commit", never "STATE's content is accurate". Pinning it here so nobody
+    // later builds a gate on the derived commit distance.
+    const dir = track(mkGit('gsd-2573-restamp-'));
+    const first = extractFrontmatter(syncStateFrontmatter(MINIMAL_STATE, dir)).state_head;
+
+    fs.writeFileSync(path.join(dir, 'unrelated.txt'), 'change\n');
+    execSync('git add -A && git commit -m "unrelated"', { cwd: dir, stdio: 'pipe' });
+    const second = extractFrontmatter(syncStateFrontmatter(MINIMAL_STATE, dir)).state_head;
+
+    const head = execSync('git rev-parse HEAD', { cwd: dir, encoding: 'utf-8' }).trim();
+    assert.notStrictEqual(second, first, 'a new commit must produce a new state_head');
+    assert.strictEqual(second, head, 'state_head must track the current HEAD');
+  });
+});
+
+
+// ─── #2573: property invariants for the state_head fence ─────────────────────
+//
+// `state_head` is read from disk and then passed to git AS AN ARGUMENT, which
+// makes this a parser with a security-relevant fence — the class the repo's
+// testing standards require fast-check coverage for. Example-based tests pin
+// the shapes we thought of; these pin the invariant for the ones we didn't.
+
+describe('readStateHeadFreshness — property invariants (#2573)', () => {
+  const fc = require('./helpers/fast-check-setup.cjs');
+  const { execSync } = require('child_process');
+  const { after } = require('node:test');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { cleanup } = require('./helpers.cjs');
+  const { readStateHeadFreshness } = require('../gsd-core/bin/lib/state.cjs');
+
+  const propDirs = [];
+  after(() => { while (propDirs.length) cleanup(propDirs.pop()); });
+
+  function gitRepo() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-prop-'));
+    propDirs.push(dir);
+    execSync('git init -q', { cwd: dir, stdio: 'pipe' });
+    execSync('git config user.email "t@t.com"', { cwd: dir, stdio: 'pipe' });
+    execSync('git config user.name "T"', { cwd: dir, stdio: 'pipe' });
+    execSync('git config commit.gpgsign false', { cwd: dir, stdio: 'pipe' });
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'a\n');
+    execSync('git add -A && git commit -q -m seed', { cwd: dir, stdio: 'pipe' });
+    return dir;
+  }
+
+const HEX_RE = /^[0-9a-f]{4,40}$/i;
+
+  const repo = gitRepo();
+
+  test('(a) total function — never throws for arbitrary input', () => {
+    fc.assert(
+      fc.property(fc.anything(), (value) => {
+        readStateHeadFreshness(repo, value);
+        return true;
+      }),
+    );
+  });
+
+  test('(b) fence — non-hex input never yields a stamp', () => {
+    fc.assert(
+      fc.property(fc.string(), (s) => {
+        const r = readStateHeadFreshness(repo, s);
+        if (HEX_RE.test(s.trim())) return true; // valid shape: out of scope here
+        return r.state_head === null && r.commits_behind === null && r.commit_stale === null;
+      }),
+    );
+  });
+
+  test('(c) tri-state integrity — unknown never reads as known-fresh', () => {
+    fc.assert(
+      fc.property(fc.string(), (s) => {
+        const r = readStateHeadFreshness(repo, s);
+        const validTri = r.commit_stale === null || r.commit_stale === true || r.commit_stale === false;
+        const unknownIsNull = r.commits_behind === null ? r.commit_stale === null : true;
+        const agreement = typeof r.commits_behind === 'number'
+          ? r.commit_stale === (r.commits_behind > 0)
+          : true;
+        return validTri && unknownIsNull && agreement;
+      }),
+    );
+  });
+
+  test('(d) no git-argument injection — dash-led values are rejected by the fence', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('--all', '-n', '--not', '--output=/tmp/pwn', '--help', '-- --all'),
+        fc.string(),
+        (flag, tail) => {
+          const r = readStateHeadFreshness(repo, `${flag}${tail}`);
+          return r.state_head === null && r.commits_behind === null && r.commit_stale === null;
+        },
+      ),
+    );
+  });
+
+  test('(e) a real HEAD sha always resolves to zero commits behind', () => {
+    const head = execSync('git rev-parse HEAD', { cwd: repo, encoding: 'utf-8' }).trim();
+    const r = readStateHeadFreshness(repo, head);
+    assert.strictEqual(r.commits_behind, 0);
+    assert.strictEqual(r.commit_stale, false);
+    assert.strictEqual(r.state_head, head.slice(0, 7));
+  });
+});

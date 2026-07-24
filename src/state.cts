@@ -20,7 +20,7 @@ const { escapeRegex, normalizePhaseName, extractPhaseToken, parsePhaseFromProse,
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import roadmapParserMod = require('./roadmap-parser.cjs');
 const { getMilestoneInfo, getMilestonePhaseFilter, extractCurrentMilestone } = roadmapParserMod;
-import { platformWriteSync, platformReadSync, platformEnsureDir, retryRenameSync, toPosixPath } from './shell-command-projection.cjs';
+import { platformWriteSync, platformReadSync, platformEnsureDir, retryRenameSync, toPosixPath, execGit } from './shell-command-projection.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
 const { planningDir, planningPaths } = planningWorkspace;
@@ -1754,6 +1754,12 @@ function buildStateFrontmatter(bodyContent: string, cwd: string | undefined): Re
   fm['last_updated'] = realClock.nowIso();
   if (lastActivity) fm['last_activity'] = lastActivity;
   if (lastActivityDesc) fm['last_activity_desc'] = lastActivityDesc;
+  // #2573: stamp the commit this STATE.md was written against, so consumers can
+  // report how far the codebase has moved since. Omitted entirely outside a git
+  // repo — an absent field reads as "unknown", which is the honest answer and
+  // keeps every consumer's tri-state intact (see readStateHeadFreshness).
+  const stateHead = readGitHeadSha(cwd);
+  if (stateHead) fm['state_head'] = stateHead;
 
   const progress: Record<string, unknown> = {};
   if (totalPhases !== null) progress['total_phases'] = totalPhases;
@@ -1764,6 +1770,87 @@ function buildStateFrontmatter(bodyContent: string, cwd: string | undefined): Re
   if (Object.keys(progress).length > 0) fm['progress'] = progress;
 
   return fm;
+}
+
+// ─── state_head commit provenance (#2573) ────────────────────────────────────
+//
+// STATE.md records the commit it was written against (`state_head`); consumers
+// derive how many commits the codebase has moved since. This mirrors the shipped
+// graphify commit-staleness contract (src/graphify.cts, #3170) rather than
+// inventing a second vocabulary: `commits_behind` is a count, and `commit_stale`
+// is TRI-STATE — null means "we don't know" (no git, no stamp, unresolvable
+// commit), which is deliberately distinct from false ("known fresh").
+//
+// IMPORTANT — this is a freshness PROXY, never a drift measurement.
+// `rev-list state_head..HEAD` counts every commit in between, including ones
+// that never touched anything STATE.md describes. And because `state_head`
+// restamps on EVERY state write, a low count means "something wrote STATE
+// recently", NOT "STATE's content is accurate". Consumers must word it as
+// approximate and must never gate on it.
+
+/** Strict hash fence before any value from disk reaches a git argument. */
+const STATE_HEAD_HASH_RE = /^[0-9a-f]{4,40}$/i;
+
+/**
+ * Resolve the project's current HEAD sha, or null when unavailable.
+ * Bounded + non-interactive via execGit (10s timeout, GIT_TERMINAL_PROMPT=0);
+ * a non-repo, missing git, or timeout degrades to null rather than throwing.
+ */
+function readGitHeadSha(cwd: string | undefined): string | null {
+  if (!cwd) return null;
+  const r = execGit(['rev-parse', 'HEAD'], { cwd });
+  if (r.exitCode !== 0) return null;
+  const sha = r.stdout.trim();
+  return STATE_HEAD_HASH_RE.test(sha) ? sha : null;
+}
+
+interface StateHeadFreshness {
+  /** The recorded stamp, short form, or null when absent/malformed. */
+  state_head: string | null;
+  /** Current HEAD, short form, or null outside a resolvable repo. */
+  current_commit: string | null;
+  /** Commits between the stamp and HEAD; null when either end is unknown. */
+  commits_behind: number | null;
+  /** Tri-state: null = unknown, false = known fresh, true = moved since. */
+  commit_stale: boolean | null;
+}
+
+/**
+ * Derive the commit-age freshness signal from a recorded `state_head`.
+ *
+ * Single source of truth for the derivation — `validate.health` (W024) and
+ * smart-entry both consume this rather than re-deriving it, so the tri-state
+ * and the hash fence cannot drift apart between surfaces.
+ *
+ * Never throws: every unresolvable input degrades to nulls.
+ */
+function readStateHeadFreshness(
+  cwd: string | undefined,
+  stateHead: unknown,
+): StateHeadFreshness {
+  const raw = (typeof stateHead === 'string' ? stateHead : '').trim();
+  const stamp = STATE_HEAD_HASH_RE.test(raw) ? raw : null;
+  const head = readGitHeadSha(cwd);
+
+  let commitsBehind: number | null = null;
+  let commitStale: boolean | null = null;
+  if (stamp && head && cwd) {
+    const r = execGit(['rev-list', '--count', `${stamp}..${head}`], { cwd });
+    if (r.exitCode === 0) {
+      const n = parseInt(r.stdout.trim(), 10);
+      if (Number.isFinite(n)) {
+        commitsBehind = n;
+        commitStale = n > 0;
+      }
+    }
+  }
+
+  return {
+    state_head: stamp ? stamp.slice(0, 7) : null,
+    current_commit: head ? head.slice(0, 7) : null,
+    commits_behind: commitsBehind,
+    commit_stale: commitStale,
+  };
 }
 
 function syncStateFrontmatter(content: string, cwd: string | undefined): string {
@@ -3246,6 +3333,7 @@ export = {
   writeStateMd,
   readModifyWriteStateMd,
   syncStateFrontmatter,
+  readStateHeadFreshness,
   withStateLock,
   updatePerformanceMetricsSection,
   cmdStateLoad,

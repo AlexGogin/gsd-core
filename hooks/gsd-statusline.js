@@ -162,6 +162,9 @@ function parseStateMd(content) {
       if (key === 'active_phase') state.activePhase = (v === 'null' || v === '') ? null : v;
       // next_action: recommended command when idle (discuss-phase / plan-phase / execute-phase / verify-phase)
       if (key === 'next_action') state.nextAction = (v === 'null' || v === '') ? null : v;
+      // state_head: commit STATE.md was written against (#2573). Fenced to a
+      // hash shape here because it is later passed to git as an argument.
+      if (key === 'state_head' && /^[0-9a-f]{4,40}$/i.test(v)) state.stateHead = v;
     }
     // next_phases supports both flow array and block-list YAML forms.
     const npFlowMatch = fm.match(/^next_phases:\s*\[([^\]]*)\]/m);
@@ -287,6 +290,15 @@ function formatGsdState(s) {
     }
   }
 
+  // #2573: STATE.md commit-age freshness. Ambient display only — it reports
+  // how many commits the codebase has moved since STATE.md was written, and
+  // deliberately never claims STATE.md is WRONG (rev-list counts unrelated
+  // commits too, and any state write restamps it). Absent unless a stamp was
+  // read AND git resolved it, so unknown stays silent rather than reading fresh.
+  if (typeof s.commitsBehind === 'number' && s.commitsBehind > 0) {
+    parts.push(`state ~${s.commitsBehind} commits back`);
+  }
+
   return parts.join(' · ');
 }
 
@@ -389,6 +401,8 @@ function formatGsdStateCompact(s) {
     }
   }
 
+  if (typeof s.commitsBehind === 'number' && s.commitsBehind > 0) parts.push(`~${s.commitsBehind}c`);
+
   return parts.join(' \u00b7 ');
 }
 
@@ -425,6 +439,29 @@ const GIT_STATUS_TIMEOUT_MS = 1500;
  * Returns raw stdout, or null when git is missing, dir isn't a repo, or the
  * call times out. Never throws.
  */
+/**
+ * Count commits between `sha` and HEAD in dir (#2573).
+ *
+ * Returns a number, or null when git is missing, dir isn't a repo, the commit
+ * is unreachable, or the call times out. Never throws. One extra spawn per
+ * render, gated behind the same `statusline.show_git` opt-in as readGitStatus —
+ * a user who hasn't opted into git in the statusline pays nothing.
+ *
+ * ADR-2164: git is a LOCAL, read-only source, which is what the statusline
+ * scope boundary permits. No network, no credentials.
+ */
+function readCommitsBehind(dir, sha) {
+  if (!sha || !/^[0-9a-f]{4,40}$/i.test(sha)) return null;
+  try {
+    const out = childProcess.execFileSync('git', ['-C', dir, 'rev-list', '--count', `${sha}..HEAD`],
+      { encoding: 'utf8', timeout: GIT_STATUS_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    const n = parseInt(String(out).trim(), 10);
+    return Number.isFinite(n) ? n : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 function readGitStatus(dir) {
   try {
     // 8 MiB maxBuffer (default 1 MiB) headroom for repos with very many changed
@@ -634,6 +671,7 @@ function runStatusline() {
     let position = 'end';
     let stateFormat = 'full';
     let gitSuffix = '';
+    let showGit = false;
     try {
       if (getConfigValue(cfg, 'statusline.show_last_command') === true) {
         const transcriptPath = data.transcript_path;
@@ -646,6 +684,7 @@ function runStatusline() {
       if (cfgPos != null) position = cfgPos;
       if (getConfigValue(cfg, 'statusline.state_format') === 'compact') stateFormat = 'compact';
       if (getConfigValue(cfg, 'statusline.show_git') === true) {
+        showGit = true;
         gitSuffix = buildGitSegment(parseGitStatus(readGitStatus(dir)));
       }
     } catch (e) {
@@ -654,6 +693,9 @@ function runStatusline() {
 
     if (!task) {
       const state = readGsdState(dir) || {};
+      // #2573: commit-age freshness. Only probed when the user already opted
+      // into git in the statusline, so no one pays a spawn they didn't ask for.
+      if (showGit && state.stateHead) state.commitsBehind = readCommitsBehind(dir, state.stateHead);
       gsdStateStr = stateFormat === 'compact' ? formatGsdStateCompact(state) : formatGsdState(state);
     }
 
@@ -774,6 +816,7 @@ function renderStatusline(data) {
   let position = 'end';
   let stateFormat = 'full';
   let gitSuffix = '';
+  let showGit = false;
   try {
     const cfg = readGsdConfig(dir);
     if (getConfigValue(cfg, 'statusline.show_last_command') === true) {
@@ -786,11 +829,13 @@ function renderStatusline(data) {
     if (cfgPos != null) position = cfgPos;
     if (getConfigValue(cfg, 'statusline.state_format') === 'compact') stateFormat = 'compact';
     if (getConfigValue(cfg, 'statusline.show_git') === true) {
+      showGit = true;
       gitSuffix = buildGitSegment(parseGitStatus(readGitStatus(dir)));
     }
   } catch (e) { /* swallow */ }
 
   const state = readGsdState(dir) || {};
+  if (showGit && state.stateHead) state.commitsBehind = readCommitsBehind(dir, state.stateHead);
   const gsdStateStr = stateFormat === 'compact' ? formatGsdStateCompact(state) : formatGsdState(state);
   const middle = gsdStateStr ? `\x1b[2m${gsdStateStr}\x1b[0m` : null;
   return composeStatusline({ model, ctx: '', middle, dirname, lastCmdSuffix, gitSuffix, position });

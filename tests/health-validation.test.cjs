@@ -1816,3 +1816,123 @@ describe('validate consistency — checklist-style roadmap phases must not emit 
 });
   });
 }
+
+// ── W024 (#2573): STATE.md commit-age freshness advisory ─────────────────────
+//
+// Advisory ONLY. It appends to warnings[] and must never change `status` or any
+// existing count — promoting it to a gate is a separate, disclosed change.
+//
+// Goodhart guard (why the threshold is coarse and the wording is a proxy):
+// `state_head` restamps on EVERY state write, so a low commits-behind count
+// means "something wrote STATE recently", not "STATE's content is accurate".
+// The number is a freshness proxy; the message must never assert drift.
+describe('W024 — STATE.md commit-age freshness advisory (#2573)', () => {
+  const { execSync } = require('child_process');
+  const { after } = require('node:test');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { runGsdTools, cleanup } = require('./helpers.cjs');
+  const {
+    STATE_HEAD_ADVISORY_COMMITS,
+  } = require('../gsd-core/bin/lib/verify.cjs');
+
+  const dirs = [];
+  const track = (d) => { dirs.push(d); return d; };
+  after(() => { while (dirs.length) cleanup(dirs.pop()); });
+
+  function project({ commitsAhead, stateHead = 'BASE' }) {
+    const base = track(fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-h-')));
+    const planningDir = path.join(base, '.planning');
+    fs.mkdirSync(path.join(planningDir, 'phases'), { recursive: true });
+    fs.writeFileSync(
+      path.join(planningDir, 'PROJECT.md'),
+      '# Project\n\n## What This Is\nTest.\n\n## Core Value\nTest.\n\n## Requirements\nTest.\n',
+    );
+    fs.writeFileSync(path.join(planningDir, 'config.json'), JSON.stringify({ model_profile: 'balanced' }));
+    fs.writeFileSync(
+      path.join(planningDir, 'ROADMAP.md'),
+      '# Roadmap\n\n## Milestone v1.0\n\n### Phase 1: One\n**Goal:** g\n',
+    );
+
+    execSync('git init -q', { cwd: base, stdio: 'pipe' });
+    execSync('git config user.email "t@t.com"', { cwd: base, stdio: 'pipe' });
+    execSync('git config user.name "T"', { cwd: base, stdio: 'pipe' });
+    execSync('git config commit.gpgsign false', { cwd: base, stdio: 'pipe' });
+    execSync('git add -A && git commit -q -m seed', { cwd: base, stdio: 'pipe' });
+    const head = execSync('git rev-parse HEAD', { cwd: base, encoding: 'utf-8' }).trim();
+
+    fs.writeFileSync(
+      path.join(planningDir, 'STATE.md'),
+      [
+        '---',
+        'status: executing',
+        ...(stateHead === null ? [] : [`state_head: ${stateHead === 'BASE' ? head : stateHead}`]),
+        '---',
+        '',
+        '# State',
+        '',
+        '**Current Phase:** 1',
+        '**Status:** In progress',
+        '',
+      ].join('\n'),
+    );
+
+    for (let i = 0; i < commitsAhead; i++) {
+      fs.writeFileSync(path.join(base, `f${i}.txt`), `${i}\n`);
+      execSync(`git add -A && git commit -q -m c${i}`, { cwd: base, stdio: 'pipe' });
+    }
+    return base;
+  }
+
+  function health(dir) {
+    const r = runGsdTools(['validate', 'health', '--json'], dir);
+    assert.strictEqual(r.success, true, `unexpected failure: ${r.error}`);
+    return JSON.parse(r.output);
+  }
+
+  test('exports a named threshold constant rather than a bare magic number', () => {
+    assert.strictEqual(typeof STATE_HEAD_ADVISORY_COMMITS, 'number');
+    assert.ok(STATE_HEAD_ADVISORY_COMMITS > 0);
+  });
+
+  test('does NOT fire when STATE.md was written at HEAD', () => {
+    const data = health(project({ commitsAhead: 0 }));
+    const w024 = (data.warnings ?? []).filter((w) => w.code === 'W024');
+    assert.strictEqual(w024.length, 0, `expected no W024, got ${JSON.stringify(w024)}`);
+  });
+
+  test('does NOT fire below the threshold (a healthy project stays quiet)', () => {
+    // Hyrum guard: firing on every ordinary project would change health's
+    // observable "clean" state and make anything gating on clean-health noisy.
+    const data = health(project({ commitsAhead: 1 }));
+    const w024 = (data.warnings ?? []).filter((w) => w.code === 'W024');
+    assert.strictEqual(w024.length, 0, `expected no W024 at 1 commit, got ${JSON.stringify(w024)}`);
+  });
+
+  test('fires at/above the threshold, states the count, and stays a proxy (never asserts drift)', () => {
+    const data = health(project({ commitsAhead: STATE_HEAD_ADVISORY_COMMITS }));
+    const w024 = (data.warnings ?? []).filter((w) => w.code === 'W024');
+    assert.strictEqual(w024.length, 1, `expected exactly one W024, got ${JSON.stringify(data.warnings)}`);
+    const msg = String(w024[0].message);
+    assert.ok(msg.includes(String(STATE_HEAD_ADVISORY_COMMITS)),
+      `W024 must state the commit count, got: ${msg}`);
+    assert.ok(/approximate/i.test(msg),
+      `W024 must frame the signal as approximate (freshness proxy), got: ${msg}`);
+    assert.ok(!/\bdrift(ed)?\b|\bis wrong\b|\bstale content\b/i.test(msg),
+      `W024 must NOT assert drift — it is a proxy, not a measurement. Got: ${msg}`);
+  });
+
+  test('is advisory only — never changes status', () => {
+    const stale = health(project({ commitsAhead: STATE_HEAD_ADVISORY_COMMITS }));
+    const fresh = health(project({ commitsAhead: 0 }));
+    assert.strictEqual(stale.status, fresh.status,
+      'W024 must not change health status — it appends to warnings[] only');
+  });
+
+  test('absent state_head → no W024 (unknown is not a finding)', () => {
+    const data = health(project({ commitsAhead: 5, stateHead: null }));
+    const w024 = (data.warnings ?? []).filter((w) => w.code === 'W024');
+    assert.strictEqual(w024.length, 0, `unknown must stay silent, got ${JSON.stringify(w024)}`);
+  });
+});
