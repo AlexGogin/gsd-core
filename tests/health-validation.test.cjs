@@ -1891,6 +1891,8 @@ describe('W024 — STATE.md commit-age freshness advisory (#2573)', () => {
     return JSON.parse(r.output);
   }
 
+  const w024 = (d) => (d.warnings ?? []).filter((w) => w.code === 'W024');
+
   test('exports a named threshold constant rather than a bare magic number', () => {
     assert.strictEqual(typeof STATE_HEAD_ADVISORY_COMMITS, 'number');
     assert.ok(STATE_HEAD_ADVISORY_COMMITS > 0);
@@ -1923,11 +1925,22 @@ describe('W024 — STATE.md commit-age freshness advisory (#2573)', () => {
       `W024 must NOT assert drift — it is a proxy, not a measurement. Got: ${msg}`);
   });
 
-  test('is advisory only — never changes status', () => {
-    const stale = health(project({ commitsAhead: STATE_HEAD_ADVISORY_COMMITS }));
-    const fresh = health(project({ commitsAhead: 0 }));
-    assert.strictEqual(stale.status, fresh.status,
-      'W024 must not change health status — it appends to warnings[] only');
+  test('is advisory only — lands in warnings[], never errors[] or the repair set', () => {
+    // NOT "stale.status === fresh.status": these fixtures already carry W006
+    // ("Phase in ROADMAP but no directory"), so both sides are `degraded`
+    // regardless of W024 and that assertion can never fail. Health derives
+    // status from warnings by design (warnings -> degraded), so the real
+    // invariant is that W024 is a WARNING and never escalates.
+    const data = health(project({ commitsAhead: STATE_HEAD_ADVISORY_COMMITS }));
+    assert.strictEqual(w024(data).length, 1, 'precondition: W024 fired');
+    assert.ok(
+      !(data.errors ?? []).some((e) => e.code === 'W024'),
+      `W024 must never appear in errors[]: ${JSON.stringify(data.errors)}`,
+    );
+    assert.notStrictEqual(data.status, 'broken',
+      'an advisory must never break health');
+    assert.ok(!w024(data)[0].repairable,
+      'W024 is diagnostic, not auto-repairable — it must not enter the repair set');
   });
 
   test('absent state_head → no W024 (unknown is not a finding)', () => {
