@@ -170,7 +170,7 @@ function phaseTokenFromDirName(name: string): string | null {
  * Parse a `last_activity` value that may be an ISO date or a free-form string
  * into an epoch-ms timestamp. Returns null when unparseable.
  *
- * #2547: `last_activity` routinely carries a trailing " — <description>" — the
+ * #2570: `last_activity` routinely carries a trailing " — <description>" — the
  * shape `templates/state.md` itself prescribes (`Last activity: [YYYY-MM-DD] —
  * [What happened]`), which gsd-core's own STATE.md mirrors into frontmatter.
  * `Date.parse` on the whole string returns NaN, and because `staleActivity`

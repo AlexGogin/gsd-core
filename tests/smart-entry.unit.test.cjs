@@ -550,7 +550,7 @@ describe('#2427 — roadmap-grounded completion + tightened status regex', () =>
   });
 });
 
-describe('smart-entry: stale_activity honors the template\'s "date — description" shape (#2547)', () => {
+describe('smart-entry: stale_activity honors the template\'s "date — description" shape (#2570)', () => {
   afterEach(removeAll);
 
   // A fixed "now" far enough past 2026-06-08 that any real date there is well
@@ -645,4 +645,43 @@ describe('smart-entry: stale_activity honors the template\'s "date — descripti
       'a next-day activity with a description must NOT be flagged stale',
     );
   });
+
+  // Boundary coverage for the fallback branch. NOTE: these are NOT fail-first
+  // regressions — a malformed or empty value returned null before the fix too.
+  // They pin the degrade-safely contract so a future change to the leading-date
+  // regex cannot start throwing, or start guessing, on unparseable input.
+  for (const [label, value] of [
+    ['a malformed leading date', '2026-13-45 — nonsense month and day'],
+    ['a non-date prefix', 'yesterday — did some work'],
+    ['an empty value', ''],
+    ['a whitespace-only value', '   '],
+  ]) {
+    test(`${label} degrades to not-stale without throwing`, () => {
+      const stateMd = [
+        '---',
+        'status: executing',
+        `last_activity: ${value}`,
+        '---',
+        '',
+        '# Project State',
+        '',
+        'Phase: 1',
+        '',
+      ].join('\n');
+      const dir = track(makeProject({ state: stateMd, roadmap: true }));
+      let signals;
+      assert.doesNotThrow(() => {
+        signals = detectSignals(dir, FIXED_NOW);
+      }, `${label} must not throw`);
+      // Unparseable reads as not-stale because staleActivity treats null as
+      // "not stale". That fail-open is pre-existing and out of scope for #2570
+      // (which is fenced to the description-suffix parse); asserted here so the
+      // behavior is recorded rather than silently assumed.
+      assert.equal(
+        signals.stale_activity,
+        false,
+        `${label} must degrade to not-stale, not throw or guess`,
+      );
+    });
+  }
 });
