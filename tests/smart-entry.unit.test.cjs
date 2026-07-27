@@ -691,8 +691,16 @@ describe('smart-entry: stale_activity honors the template\'s "date — descripti
   // pre-existing '2026-13-45' case above only exercises an invalid MONTH,
   // which Date.parse happens to reject outright — it cannot catch this class.
   //
-  // These ARE fail-first: on pre-fix code every one of them parses to a real
-  // date 1-2 days later and reads stale=true.
+  // Only the two BARE cases are fail-first. On pre-fix code '2026-02-30'
+  // parses to 2026-03-02 and '2026-06-31' to 2026-07-01 — both read
+  // stale=true where the fix now reads false.
+  //
+  // The two suffixed cases are NOT fail-first: the trailing description
+  // already makes the pre-fix whole-string Date.parse return NaN, so
+  // stale_activity is false both before and after. They are kept because
+  // they pin the new calendar-validity behaviour for the suffix-carrying
+  // shape templates/state.md prescribes — but they do not demonstrate the
+  // regression, and should not be cited as if they did.
   for (const [label, value] of [
     ['Feb 30 with a description', '2026-02-30 — fat-fingered the day'],
     ['Feb 30 bare', '2026-02-30'],
