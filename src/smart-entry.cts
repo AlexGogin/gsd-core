@@ -218,6 +218,14 @@ function parseActivityTimestamp(raw: string | null): number | null {
     // Date.parse substitute a rolled-forward one. null = "no activity signal",
     // the safe default staleActivity already fails open on.
     if (!isRealCalendarDate(Number(year), Number(month), Number(day))) return null;
+    // The date is real, so stay as liberal as before (Postel): a whole-string
+    // parse still wins when the engine can make sense of the value. Reading the
+    // token first would silently DROP a trailing zone name -- "2026-06-08
+    // 12:34:56 GMT" parses whole as 12:34:56Z but as local time from the token,
+    // shifting the instant by the host's UTC offset.
+    const whole = Date.parse(trimmed);
+    if (!Number.isNaN(whole)) return whole;
+    // Whole-string failed: the value carries a description suffix (#2570).
     const ms = Date.parse(`${year}-${month}-${day}${time}`);
     return Number.isNaN(ms) ? null : ms;
   }

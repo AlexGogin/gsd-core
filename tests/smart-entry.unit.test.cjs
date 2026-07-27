@@ -776,6 +776,33 @@ describe('smart-entry: stale_activity honors the template\'s "date — descripti
     });
   }
 
+  // Leniency guard. The calendar check must not narrow what already parsed:
+  // reading the leading token in preference to the whole string would DROP a
+  // trailing zone name and re-read the time as local, shifting the instant by
+  // the host's UTC offset. Pinned with a value whose verdict flips if that
+  // happens on a host east of UTC.
+  test('a trailing zone name is still honored, not dropped for the leading token', () => {
+    const stateMd = [
+      '---',
+      'status: executing',
+      'last_activity: 2026-07-28 23:30:00 GMT',
+      '---',
+      '',
+      '# Project State',
+      '',
+      'Phase: 1',
+      '',
+    ].join('\n');
+    const dir = track(makeProject({ state: stateMd, roadmap: true }));
+    const signals = detectSignals(dir, FIXED_NOW);
+    // 2026-07-28T23:30:00Z is 72.5h before FIXED_NOW -> stale.
+    assert.equal(
+      signals.stale_activity,
+      true,
+      'GMT must be read as UTC; dropping it re-reads the time as local and moves the instant',
+    );
+  });
+
   // CONTRIBUTING.md QA Matrix: "Mixed CRLF/LF newlines" for frontmatter parsing
   // changes. No live defect — the fallback branch trims before matching — but
   // the standard asks for the fixture, and this pins it.
