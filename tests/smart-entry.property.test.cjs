@@ -23,6 +23,15 @@
  *       simply reports everything stale.
  *   (c) total function — detectSignals never throws and stale_activity is
  *       always a boolean, for arbitrary junk in last_activity.
+ *   (d) threshold-exactness — driven with a FULL ISO instant rather than a
+ *       bare date, stale_activity equals `age > IDLE_STALE_MS` across the
+ *       whole range. (a)/(b) deliberately skip the [24, 95]h band because a
+ *       date-only value truncates to UTC midnight and cannot express limit±1;
+ *       (d) closes that band, including 71/72/73h, against an exact oracle.
+ *   (e) calendar validity — a shape-valid date whose day cannot exist never
+ *       yields a timestamp. Date.parse rolls those FORWARD (2026-02-30 ->
+ *       2026-03-02), so shape-only validation would propagate a wrong instant
+ *       instead of failing safe (ADR-227).
  *
  * IDLE_STALE_MS is 72h (src/smart-entry.cts). The clock is injected, so these
  * never depend on wall time.
@@ -40,6 +49,24 @@ const { detectSignals } = require('../gsd-core/bin/lib/smart-entry.cjs');
 
 const FIXED_NOW = () => Date.parse('2026-08-01T00:00:00Z');
 const HOUR_MS = 3600 * 1000;
+/** Mirrors IDLE_STALE_MS (src/smart-entry.cts:121). The oracle for (d). */
+const IDLE_STALE_MS = 72 * HOUR_MS;
+
+/**
+ * Shape-valid dates whose DAY cannot exist. All are in the past relative to
+ * FIXED_NOW, so a rolled-forward parse would read stale=true — which is what
+ * makes the property discriminating rather than vacuous.
+ */
+const IMPOSSIBLE_DAYS = [
+  '2026-02-30',
+  '2026-02-31',
+  '2026-04-31',
+  '2026-06-31',
+  '2025-02-29', // 2025 is not a leap year
+  '2025-11-31',
+  '2024-04-31',
+  '2023-06-31',
+];
 
 const created = [];
 
@@ -146,6 +173,48 @@ describe('smart-entry stale_activity — properties (#2570)', () => {
             typeof signals.stale_activity,
             'boolean',
             'stale_activity must remain a boolean for unparseable input',
+          );
+        },
+      ),
+    );
+  });
+
+  test('(d) with an exact instant, stale_activity tracks the 72h threshold across the whole range', () => {
+    fc.assert(
+      fc.property(
+        // The FULL range, including the [24, 95]h band (a) and (b) skip and the
+        // limit itself. Properties (a)/(b) use bare dates, which truncate to UTC
+        // midnight and so cannot address the threshold; a full ISO instant can.
+        fc.integer({ min: 0, max: 24 * 365 }),
+        descriptionSuffix,
+        (hoursAgo, suffix) => {
+          const instant = new Date(FIXED_NOW() - hoursAgo * HOUR_MS).toISOString();
+          const signals = detectSignals(makeProject(`${instant}${suffix}`), FIXED_NOW);
+          assert.equal(
+            signals.stale_activity,
+            hoursAgo * HOUR_MS > IDLE_STALE_MS,
+            `an instant ${hoursAgo}h old must read stale=${hoursAgo * HOUR_MS > IDLE_STALE_MS} ` +
+              'against the strict 72h comparison',
+          );
+        },
+      ),
+    );
+  });
+
+  test('(e) an impossible calendar date never yields a timestamp', () => {
+    fc.assert(
+      fc.property(
+        // Day-in-month overflows only: a shape-valid date whose day cannot
+        // exist. Date.parse rolls these FORWARD, so a shape-only guard would
+        // substitute a real — and wrong — instant instead of failing safe.
+        fc.constantFrom(...IMPOSSIBLE_DAYS),
+        descriptionSuffix,
+        (date, suffix) => {
+          const signals = detectSignals(makeProject(`${date}${suffix}`), FIXED_NOW);
+          assert.equal(
+            signals.stale_activity,
+            false,
+            `${date} does not exist; it must coerce to the safe default, not roll forward`,
           );
         },
       ),

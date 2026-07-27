@@ -684,4 +684,119 @@ describe('smart-entry: stale_activity honors the template\'s "date — descripti
       );
     });
   }
+
+  // ADR-227: shape validation alone is not enough. Date.parse rolls an
+  // out-of-range DAY forward instead of rejecting it, so a shape-only guard
+  // propagates a different, wrong instant rather than failing safe. The
+  // pre-existing '2026-13-45' case above only exercises an invalid MONTH,
+  // which Date.parse happens to reject outright — it cannot catch this class.
+  //
+  // These ARE fail-first: on pre-fix code every one of them parses to a real
+  // date 1-2 days later and reads stale=true.
+  for (const [label, value] of [
+    ['Feb 30 with a description', '2026-02-30 — fat-fingered the day'],
+    ['Feb 30 bare', '2026-02-30'],
+    ['Apr 31 with a description', '2026-04-31 — thirty days hath September'],
+    ['Jun 31 bare', '2026-06-31'],
+  ]) {
+    test(`an impossible calendar date (${label}) fails safe instead of rolling forward`, () => {
+      const stateMd = [
+        '---',
+        'status: executing',
+        `last_activity: ${value}`,
+        '---',
+        '',
+        '# Project State',
+        '',
+        'Phase: 1',
+        '',
+      ].join('\n');
+      const dir = track(makeProject({ state: stateMd, roadmap: true }));
+      const signals = detectSignals(dir, FIXED_NOW);
+      assert.equal(
+        signals.stale_activity,
+        false,
+        `${label} must coerce to the safe default, not a rolled-forward instant`,
+      );
+    });
+  }
+
+  test('a real leap day still parses (the guard must not over-reject)', () => {
+    const stateMd = [
+      '---',
+      'status: executing',
+      'last_activity: 2024-02-29 — leap day is a real date',
+      '---',
+      '',
+      '# Project State',
+      '',
+      'Phase: 1',
+      '',
+    ].join('\n');
+    const dir = track(makeProject({ state: stateMd, roadmap: true }));
+    const signals = detectSignals(dir, FIXED_NOW);
+    assert.equal(
+      signals.stale_activity,
+      true,
+      'a valid Feb 29 in a leap year must parse and read stale, not be rejected',
+    );
+  });
+
+  // RULESET.TESTS.boundary-coverage on IDLE_STALE_MS (72h). The comparison is a
+  // strict `now() - lastActivityMs > IDLE_STALE_MS`, so exactly-72h is NOT
+  // stale. Full ISO instants (not bare dates) are used deliberately: a bare
+  // date truncates to UTC midnight, which cannot express limit±1.
+  //
+  // NOT fail-first — these pass pre-fix too. They close the [24,95]h band the
+  // property tests skip, so an off-by-one in the threshold cannot land green.
+  for (const [label, value, expected] of [
+    ['71h — one hour inside the window', '2026-07-29T01:00:00Z — 71h ago', false],
+    ['72h — exactly at the limit (strict >)', '2026-07-29T00:00:00Z — 72h ago', false],
+    ['73h — one hour past the limit', '2026-07-28T23:00:00Z — 73h ago', true],
+  ]) {
+    test(`staleness boundary: ${label} -> stale=${expected}`, () => {
+      const stateMd = [
+        '---',
+        'status: executing',
+        `last_activity: ${value}`,
+        '---',
+        '',
+        '# Project State',
+        '',
+        'Phase: 1',
+        '',
+      ].join('\n');
+      const dir = track(makeProject({ state: stateMd, roadmap: true }));
+      const signals = detectSignals(dir, FIXED_NOW);
+      assert.equal(
+        signals.stale_activity,
+        expected,
+        `${label} must read stale=${expected} against the 72h threshold`,
+      );
+    });
+  }
+
+  // CONTRIBUTING.md QA Matrix: "Mixed CRLF/LF newlines" for frontmatter parsing
+  // changes. No live defect — the fallback branch trims before matching — but
+  // the standard asks for the fixture, and this pins it.
+  test('a CRLF-terminated STATE.md parses the suffixed date identically', () => {
+    const stateMd = [
+      '---',
+      'status: executing',
+      'last_activity: 2026-06-08 — started the widget',
+      '---',
+      '',
+      '# Project State',
+      '',
+      'Phase: 1',
+      '',
+    ].join('\r\n');
+    const dir = track(makeProject({ state: stateMd, roadmap: true }));
+    const signals = detectSignals(dir, FIXED_NOW);
+    assert.equal(
+      signals.stale_activity,
+      true,
+      'CRLF line endings must not change the parsed instant',
+    );
+  });
 });
