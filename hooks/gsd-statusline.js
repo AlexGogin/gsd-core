@@ -102,6 +102,14 @@ function readLastSlashCommand(transcriptPath) {
 // --- GSD state reader -------------------------------------------------------
 
 /**
+ * Commit-hash fence (#2573). `state_head` is read off disk and then passed to
+ * git as an ARGUMENT, so it is shape-checked before every use. Mirrors
+ * STATE_HEAD_HASH_RE in src/state.cts — one constant per module rather than one
+ * per call site, so a future tightening can't miss a copy inside this hook.
+ */
+const STATE_HEAD_HASH_RE = /^[0-9a-f]{4,40}$/i;
+
+/**
  * Walk up from dir looking for .planning/STATE.md.
  * Returns parsed state object or null.
  */
@@ -143,12 +151,17 @@ function readGsdState(dir) {
 function parseStateMd(content) {
   const state = {};
 
-  // YAML frontmatter between --- markers (anchored at file start)
-  const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+  // YAML frontmatter between --- markers (anchored at file start).
+  // CRLF-tolerant (#2573): the production-side parser this field also flows
+  // through (src/frontmatter.cts extractFrontmatter) already handles \r\n, so
+  // an LF-only regex here made the two derivation paths disagree on a CRLF
+  // STATE.md — the statusline silently parsed NOTHING and every field went
+  // undefined, not just state_head.
+  const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (fmMatch) {
     const fm = fmMatch[1];
     // Top-level scalar key: value
-    for (const line of fm.split('\n')) {
+    for (const line of fm.split(/\r?\n/)) {
       const m = line.match(/^(\w+):\s*(.+)/);
       if (!m) continue;
       const [, key, val] = m;
@@ -164,7 +177,7 @@ function parseStateMd(content) {
       if (key === 'next_action') state.nextAction = (v === 'null' || v === '') ? null : v;
       // state_head: commit STATE.md was written against (#2573). Fenced to a
       // hash shape here because it is later passed to git as an argument.
-      if (key === 'state_head' && /^[0-9a-f]{4,40}$/i.test(v)) state.stateHead = v;
+      if (key === 'state_head' && STATE_HEAD_HASH_RE.test(v)) state.stateHead = v;
     }
     // next_phases supports both flow array and block-list YAML forms.
     const npFlowMatch = fm.match(/^next_phases:\s*\[([^\]]*)\]/m);
@@ -451,8 +464,15 @@ const GIT_STATUS_TIMEOUT_MS = 1500;
  * scope boundary permits. No network, no credentials.
  */
 function readCommitsBehind(dir, sha) {
-  if (!sha || !/^[0-9a-f]{4,40}$/i.test(sha)) return null;
+  if (!sha || !STATE_HEAD_HASH_RE.test(sha)) return null;
   try {
+    // Ancestry first — see readStateHeadFreshness in src/state.cts for why.
+    // `rev-list --count A..HEAD` returns "0" when A is unreachable from HEAD
+    // (reset --hard, rebase, squash, force-push), which would render as
+    // "fresh" for a rewound codebase. execFileSync throws on a non-zero exit,
+    // so the catch below turns a non-ancestor stamp into null (= no marker).
+    childProcess.execFileSync('git', ['-C', dir, 'merge-base', '--is-ancestor', sha, 'HEAD'],
+      { encoding: 'utf8', timeout: GIT_STATUS_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     const out = childProcess.execFileSync('git', ['-C', dir, 'rev-list', '--count', `${sha}..HEAD`],
       { encoding: 'utf8', timeout: GIT_STATUS_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     const n = parseInt(String(out).trim(), 10);
@@ -801,6 +821,7 @@ module.exports = {
   shortGsdStatus, formatGsdStateCompact,
   compactModelName,
   readGitStatus, parseGitStatus, buildGitSegment,
+  readCommitsBehind,
 };
 
 /**

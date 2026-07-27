@@ -11162,6 +11162,30 @@ const HEX_RE = /^[0-9a-f]{4,40}$/i;
     );
   });
 
+  test('(f) a NON-ANCESTOR stamp resolves to unknown, never to "known fresh"', () => {
+    // `rev-list --count A..B` exits 0 with "0" when A is unreachable from B, so
+    // reset --hard / rebase / squash / force-push past the stamp used to render
+    // as commit_stale:false — "known fresh" for a codebase that was rewound.
+    // That collapses the exact unknown-vs-fresh distinction the tri-state exists
+    // to preserve, so a non-ancestor stamp must come back null.
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-nonanc-'));
+    propDirs.push(d);
+    const g = (c) => execSync(c, { cwd: d, stdio: 'pipe', encoding: 'utf-8' });
+    g('git init -q'); g('git config user.email t@t.com'); g('git config user.name T');
+    g('git config commit.gpgsign false');
+    fs.writeFileSync(path.join(d, 'a.txt'), 'a\n');
+    g('git add -A && git commit -q -m base');
+    const base = g('git rev-parse HEAD').trim();
+    fs.writeFileSync(path.join(d, 'b.txt'), 'b\n');
+    g('git add -A && git commit -q -m c1');
+    const tip = g('git rev-parse HEAD').trim();
+    g(`git reset --hard -q ${base}`);
+
+    const r = readStateHeadFreshness(d, tip);
+    assert.strictEqual(r.commits_behind, null, 'a non-ancestor stamp has no meaningful distance');
+    assert.strictEqual(r.commit_stale, null, 'unknown must NOT report as false ("known fresh")');
+  });
+
   test('(e) a real HEAD sha always resolves to zero commits behind', () => {
     const head = execSync('git rev-parse HEAD', { cwd: repo, encoding: 'utf-8' }).trim();
     const r = readStateHeadFreshness(repo, head);

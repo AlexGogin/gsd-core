@@ -1904,6 +1904,17 @@ describe('W024 — STATE.md commit-age freshness advisory (#2573)', () => {
     assert.strictEqual(w024.length, 0, `expected no W024, got ${JSON.stringify(w024)}`);
   });
 
+  test('boundary: silent at threshold-1, fires at threshold+1', () => {
+    // The 0/1/20 cases alone leave the actual boundary untested — 1 is a
+    // trivial-fit, not an edge. These two pin the comparison operator.
+    const below = health(project({ commitsAhead: STATE_HEAD_ADVISORY_COMMITS - 1 }));
+    assert.strictEqual((below.warnings ?? []).filter((w) => w.code === 'W024').length, 0,
+      `must stay silent at ${STATE_HEAD_ADVISORY_COMMITS - 1} commits`);
+    const above = health(project({ commitsAhead: STATE_HEAD_ADVISORY_COMMITS + 1 }));
+    assert.strictEqual((above.warnings ?? []).filter((w) => w.code === 'W024').length, 1,
+      `must fire at ${STATE_HEAD_ADVISORY_COMMITS + 1} commits`);
+  });
+
   test('does NOT fire below the threshold (a healthy project stays quiet)', () => {
     // Hyrum guard: firing on every ordinary project would change health's
     // observable "clean" state and make anything gating on clean-health noisy.

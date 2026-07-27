@@ -1835,12 +1835,23 @@ function readStateHeadFreshness(
   let commitsBehind: number | null = null;
   let commitStale: boolean | null = null;
   if (stamp && head && cwd) {
-    const r = execGit(['rev-list', '--count', `${stamp}..${head}`], { cwd });
-    if (r.exitCode === 0) {
-      const n = parseInt(r.stdout.trim(), 10);
-      if (Number.isFinite(n)) {
-        commitsBehind = n;
-        commitStale = n > 0;
+    // The stamp must be an ANCESTOR of HEAD before a distance means anything.
+    // `rev-list --count A..B` exits 0 with "0" when A is not reachable from B —
+    // which is what a `reset --hard` to an earlier commit, a rebase or squash
+    // that drops the stamped commit, or a force-push rewriting history all
+    // produce. Without this guard those cases report `commit_stale: false`,
+    // i.e. "known fresh", for a codebase that was actually rewound past the
+    // stamp — collapsing the exact unknown-vs-fresh distinction this tri-state
+    // exists to preserve. A non-ancestor stamp is UNKNOWN, so it stays null.
+    const ancestry = execGit(['merge-base', '--is-ancestor', stamp, head], { cwd });
+    if (ancestry.exitCode === 0) {
+      const r = execGit(['rev-list', '--count', `${stamp}..${head}`], { cwd });
+      if (r.exitCode === 0) {
+        const n = parseInt(r.stdout.trim(), 10);
+        if (Number.isFinite(n)) {
+          commitsBehind = n;
+          commitStale = n > 0;
+        }
       }
     }
   }

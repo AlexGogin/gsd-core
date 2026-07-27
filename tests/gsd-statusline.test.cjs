@@ -9,7 +9,7 @@
 
 'use strict';
 
-const { test, describe } = require('node:test');
+const { test, describe, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -1932,3 +1932,103 @@ test('config-set statusline.show_context_tokens yes → rejected', () => {
     });
   });
 }
+
+// ─── #2573: state_head commit-age freshness ──────────────────────────────────
+
+describe('parseStateMd #2573 state_head', () => {
+  test('reads a well-formed state_head from frontmatter', () => {
+    const s = parseStateMd(['---', 'status: executing', 'state_head: a1b2c3d', '---'].join('\n'));
+    assert.equal(s.stateHead, 'a1b2c3d');
+  });
+
+  test('rejects a non-hash state_head — it is passed to git as an argument', () => {
+    for (const bad of ['--all', 'not-a-sha', '-n', 'zzzz', '']) {
+      const s = parseStateMd(['---', 'status: executing', `state_head: ${bad}`, '---'].join('\n'));
+      assert.equal(s.stateHead, undefined, `${JSON.stringify(bad)} must not pass the fence`);
+    }
+  });
+
+  test('parses CRLF frontmatter — the production parser already does', () => {
+    // src/frontmatter.cts extractFrontmatter is CRLF-safe, so an LF-only regex
+    // here made the two derivation paths for the same field disagree. Note the
+    // whole frontmatter block was dropped, not just state_head.
+    const s = parseStateMd(['---', 'status: executing', 'state_head: a1b2c3d', '---'].join('\r\n'));
+    assert.equal(s.status, 'executing', 'CRLF frontmatter must still parse at all');
+    assert.equal(s.stateHead, 'a1b2c3d');
+  });
+
+  test('absent state_head leaves the field undefined (degrades, no marker)', () => {
+    const s = parseStateMd(['---', 'status: executing', '---'].join('\n'));
+    assert.equal(s.stateHead, undefined);
+  });
+});
+
+describe('formatGsdState #2573 freshness marker', () => {
+  test('renders the marker when the codebase has moved since STATE.md', () => {
+    const out = formatGsdState({ status: 'executing', commitsBehind: 12 });
+    assert.match(out, /12 commits back/);
+  });
+
+  test('renders nothing at zero — written at HEAD is not worth a segment', () => {
+    assert.doesNotMatch(formatGsdState({ status: 'executing', commitsBehind: 0 }), /commits back/);
+  });
+
+  test('renders nothing when unknown — null must never read as fresh OR stale', () => {
+    assert.doesNotMatch(formatGsdState({ status: 'executing', commitsBehind: null }), /commits back/);
+    assert.doesNotMatch(formatGsdState({ status: 'executing' }), /commits back/);
+  });
+});
+
+describe('readCommitsBehind #2573', () => {
+  const { execSync } = require('node:child_process');
+  const { readCommitsBehind } = require('../hooks/gsd-statusline.js');
+
+  const dirs = [];
+  const mk = () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-sl-'));
+    dirs.push(d);
+    const g = (c) => execSync(c, { cwd: d, stdio: 'pipe', encoding: 'utf-8' });
+    g('git init -q'); g('git config user.email t@t.com'); g('git config user.name T');
+    g('git config commit.gpgsign false');
+    fs.writeFileSync(path.join(d, 'a.txt'), 'a\n');
+    g('git add -A && git commit -q -m base');
+    return { d, g, base: g('git rev-parse HEAD').trim() };
+  };
+  after(() => { while (dirs.length) cleanup(dirs.pop()); });
+
+  test('counts commits between the stamp and HEAD', () => {
+    const { d, g, base } = mk();
+    for (const i of [1, 2, 3]) {
+      fs.writeFileSync(path.join(d, `f${i}.txt`), `${i}\n`);
+      g(`git add -A && git commit -q -m c${i}`);
+    }
+    assert.equal(readCommitsBehind(d, base), 3);
+  });
+
+  test('returns 0 when STATE.md was written at HEAD', () => {
+    const { d, base } = mk();
+    assert.equal(readCommitsBehind(d, base), 0);
+  });
+
+  test('returns null when the stamp is NOT an ancestor of HEAD (history rewrite)', () => {
+    // The defect this guards: `rev-list --count A..HEAD` exits 0 with "0" when
+    // A is unreachable, so a reset --hard / rebase / squash / force-push past
+    // the stamp used to render as "fresh" for a rewound codebase.
+    const { d, g, base } = mk();
+    fs.writeFileSync(path.join(d, 'f1.txt'), '1\n');
+    g('git add -A && git commit -q -m c1');
+    const tip = g('git rev-parse HEAD').trim();
+    g(`git reset --hard -q ${base}`);
+    assert.equal(readCommitsBehind(d, tip), null,
+      'a non-ancestor stamp is UNKNOWN — it must never report 0/fresh');
+  });
+
+  test('returns null for a non-hash argument, a bad sha, and a non-repo', () => {
+    const { d } = mk();
+    assert.equal(readCommitsBehind(d, '--all'), null);
+    assert.equal(readCommitsBehind(d, 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'), null);
+    const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-norepo-'));
+    dirs.push(plain);
+    assert.equal(readCommitsBehind(plain, 'a1b2c3d'), null);
+  });
+});
