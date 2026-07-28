@@ -32,6 +32,10 @@ const { extractFrontmatter, reconstructFrontmatter, stripFrontmatter } = frontma
 import scanPhasePlans = require('./plan-scan.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import stateTransitionMod = require('./state-transition.cjs');
+
+// #2573 D5: used to pin `git rev-parse` to the project's own repo. Imports only
+// node builtins, so it introduces no cycle on this path.
+import { findProjectRoot } from './project-root.cjs';
 const { transitionCore, applyStatePreservation, sliceCurrentPositionSection } = stateTransitionMod;
 type StateTransitionIntent = stateTransitionMod.StateTransitionIntent;
 type StateTransitionDeps = stateTransitionMod.StateTransitionDeps;
@@ -1798,9 +1802,31 @@ const STATE_HEAD_HASH_RE = /^[0-9a-f]{4,40}$/i;
  */
 function readGitHeadSha(cwd: string | undefined): string | null {
   if (!cwd) return null;
-  const r = execGit(['rev-parse', 'HEAD'], { cwd });
+  // #2573 degrade path D5. `git rev-parse HEAD` walks UP from cwd to the nearest
+  // enclosing `.git`, and nothing pins that repo to the project. A GSD project
+  // living inside an unrelated checkout — a dotfiles/notes repo, or the outer
+  // workspace of a `planning.sub_repos` layout where all code commits land in
+  // the sub-repos — would otherwise measure freshness against a repo it has no
+  // relationship to, and report `commit_stale: false` ("known fresh") while
+  // doing it. Unverified provenance must degrade to unknown, never to fresh.
+  //
+  // `--show-toplevel HEAD` answers both in ONE spawn, so pinning costs no extra
+  // subprocess on this path (the caller holds the STATE lock).
+  const r = execGit(['rev-parse', '--show-toplevel', 'HEAD'], { cwd });
   if (r.exitCode !== 0) return null;
-  const sha = r.stdout.trim();
+
+  const [topRaw, shaRaw] = r.stdout.trim().split(/\r?\n/);
+  if (!topRaw || !shaRaw) return null;
+
+  let projectRoot: string;
+  try {
+    projectRoot = findProjectRoot(cwd);
+  } catch {
+    return null; // cannot prove which repo answered → unknown
+  }
+  if (path.resolve(topRaw.trim()) !== path.resolve(projectRoot)) return null;
+
+  const sha = shaRaw.trim();
   return STATE_HEAD_HASH_RE.test(sha) ? sha : null;
 }
 
@@ -1850,6 +1876,15 @@ function readStateHeadFreshness(
         const n = parseInt(r.stdout.trim(), 10);
         if (Number.isFinite(n)) {
           commitsBehind = n;
+          // #2573 D4 — deliberately RAW, not thresholded. `commit_stale` means
+          // exactly what its contract says: the codebase has moved since the
+          // stamp. Applying an advisory threshold here would make the field lie
+          // at n < threshold, and W024 needs the true count to threshold on.
+          // Alarm-fatigue is handled at the ALARMING surface, not the
+          // derivation: W024 (the only user-visible consumer) fires at
+          // STATE_HEAD_ADVISORY_COMMITS, which absorbs the `commit_docs: true`
+          // off-by-one. Smart-entry re-exports the raw tri-state as advisory
+          // JSON and is not consumed by classify().
           commitStale = n > 0;
         }
       }
@@ -1958,9 +1993,19 @@ function syncStateFrontmatter(content: string, cwd: string | undefined): string 
   // Schema-owned keys (already in derivedFm from buildStateFrontmatter + the
   // preserve guards above) still win.
   for (const key of Object.keys(existingFm)) {
-    if (!(key in derivedFm) && existingFm[key] !== undefined) {
-      derivedFm[key] = existingFm[key];
-    }
+    if (key in derivedFm || existingFm[key] === undefined) continue;
+
+    // #2573: a `derive`-classified field is recomputed from an ambient source on
+    // every write, and is OMITTED entirely when that source is unavailable (see
+    // buildStateFrontmatter's `if (stateHead)` guard). Carrying the old value
+    // forward here would re-assert provenance the file no longer has — a stale
+    // state_head would claim STATE.md was written against a commit it wasn't,
+    // contradicting its own ADR-1769 row. Consult the classification table
+    // rather than naming fields here, so the policy stays single-sourced.
+    const classification = stateTransitionMod.getFieldClassification(key);
+    if (classification && classification.preservation === 'derive') continue;
+
+    derivedFm[key] = existingFm[key];
   }
 
   // #2567: guard the information-losing direction — a stale archive

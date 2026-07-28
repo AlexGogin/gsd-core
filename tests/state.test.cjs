@@ -11061,6 +11061,39 @@ describe('syncStateFrontmatter — state_head commit provenance (#2573)', () => 
       `state_head must be absent outside a git repo, got ${JSON.stringify(fm.state_head)}`);
   });
 
+  test('drops a PRE-EXISTING state_head when the commit becomes unresolvable (never carried forward)', () => {
+    // The omission test above feeds MINIMAL_STATE, which has no pre-existing
+    // state_head — so it never reaches the #2202 carry-forward loop, which
+    // copies any key absent from derivedFm straight back from the old file.
+    // This fixture DOES carry a stamp, so it exercises that branch.
+    //
+    // state-transition.cts classifies state_head as { preservation: 'derive' }:
+    // "Never preserved: a stale stamp would claim STATE.md was written against
+    // a commit it wasn't." A carried-forward value contradicts that contract and
+    // asserts provenance the file no longer has.
+    const STAMPED_STATE = [
+      '---',
+      'status: executing',
+      'state_head: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      '---',
+      '',
+      '# Session State',
+      '',
+      'Status: executing',
+      '',
+    ].join('\n');
+
+    const dir = track(createTempProject('gsd-2573-stale-stamp-'));
+
+    let synced;
+    assert.doesNotThrow(() => { synced = syncStateFrontmatter(STAMPED_STATE, dir); },
+      'a non-git project must not throw even with a pre-existing stamp');
+    const fm = extractFrontmatter(synced);
+
+    assert.ok(!('state_head' in fm),
+      `a stale state_head must be DROPPED, not carried forward, when the commit is unresolvable — got ${JSON.stringify(fm.state_head)}`);
+  });
+
   test('restamps state_head to the new HEAD after a commit (freshness proxy resets on write)', () => {
     // Goodhart guard, asserted rather than assumed: the counter resets as a
     // side effect of ANY state write, so state_head means "written at this
@@ -11192,5 +11225,36 @@ const HEX_RE = /^[0-9a-f]{4,40}$/i;
     assert.strictEqual(r.commits_behind, 0);
     assert.strictEqual(r.commit_stale, false);
     assert.strictEqual(r.state_head, head.slice(0, 7));
+  });
+
+  test('(g) a project whose nearest .git is an ANCESTOR repo resolves to unknown, never "known fresh"', () => {
+    // #2573 degrade path D5. `git rev-parse HEAD` walks UP from cwd to the
+    // nearest enclosing .git — nothing pins that repo to the project. A GSD
+    // project living under an unrelated repo (a dotfiles/notes checkout, or the
+    // outer workspace of a planning.sub_repos layout) measures its freshness
+    // against a repo it has no relationship to.
+    //
+    // The stamp below IS that ancestor repo's HEAD, so pre-fix the ancestry
+    // check passes, rev-list returns 0, and the tri-state reports
+    // commit_stale:false — "known fresh" for a directory that is not in that
+    // repo at all. Same invariant violation as (f), reached by another route.
+    const outer = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-ancestor-'));
+    propDirs.push(outer);
+    const g = (c) => execSync(c, { cwd: outer, stdio: 'pipe', encoding: 'utf-8' });
+    g('git init -q'); g('git config user.email t@t.com'); g('git config user.name T');
+    g('git config commit.gpgsign false');
+    fs.writeFileSync(path.join(outer, 'unrelated.txt'), 'x\n');
+    g('git add -A && git commit -q -m outer');
+    const outerHead = g('git rev-parse HEAD').trim();
+
+    // The project itself is NOT a git repo — it merely sits inside one.
+    const project = path.join(outer, 'nested-project');
+    fs.mkdirSync(path.join(project, '.planning'), { recursive: true });
+
+    const r = readStateHeadFreshness(project, outerHead);
+    assert.strictEqual(r.commit_stale, null,
+      'a stamp resolved against an ancestor repo is UNKNOWN — it must not report false ("known fresh")');
+    assert.strictEqual(r.commits_behind, null,
+      'distance measured against an unrelated repo is not a meaningful count');
   });
 });
