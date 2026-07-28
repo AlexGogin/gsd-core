@@ -1800,6 +1800,32 @@ const STATE_HEAD_HASH_RE = /^[0-9a-f]{4,40}$/i;
  * Bounded + non-interactive via execGit (10s timeout, GIT_TERMINAL_PROMPT=0);
  * a non-repo, missing git, or timeout degrades to null rather than throwing.
  */
+/**
+ * Compare two filesystem paths by identity rather than by spelling.
+ *
+ * #2573: `git rev-parse --show-toplevel` reports the REAL path, while the
+ * project root arrives as the caller spelled it. Those differ routinely and
+ * legitimately — macOS temp dirs (`/var/folders/…` → `/private/var/folders/…`),
+ * any symlinked checkout, and Windows path casing. A raw string compare would
+ * report a perfectly normal project as "unknown", which is the failure mode
+ * this comparison exists to prevent, inverted.
+ *
+ * Falls back to a resolved-path compare when realpath cannot answer (a path
+ * that does not exist yet), and folds case on Windows only.
+ */
+function sameRealPath(a: string, b: string): boolean {
+  const norm = (p: string): string => {
+    let resolved: string;
+    try {
+      resolved = fs.realpathSync(path.resolve(p));
+    } catch {
+      resolved = path.resolve(p);
+    }
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  return norm(a) === norm(b);
+}
+
 function readGitHeadSha(cwd: string | undefined): string | null {
   if (!cwd) return null;
   // #2573 degrade path D5. `git rev-parse HEAD` walks UP from cwd to the nearest
@@ -1824,7 +1850,7 @@ function readGitHeadSha(cwd: string | undefined): string | null {
   } catch {
     return null; // cannot prove which repo answered → unknown
   }
-  if (path.resolve(topRaw.trim()) !== path.resolve(projectRoot)) return null;
+  if (!sameRealPath(topRaw.trim(), projectRoot)) return null;
 
   const sha = shaRaw.trim();
   return STATE_HEAD_HASH_RE.test(sha) ? sha : null;
