@@ -1801,29 +1801,29 @@ const STATE_HEAD_HASH_RE = /^[0-9a-f]{4,40}$/i;
  * a non-repo, missing git, or timeout degrades to null rather than throwing.
  */
 /**
- * Compare two filesystem paths by identity rather than by spelling.
+ * Does the project root carry its own git repository?
  *
- * #2573: `git rev-parse --show-toplevel` reports the REAL path, while the
- * project root arrives as the caller spelled it. Those differ routinely and
- * legitimately — macOS temp dirs (`/var/folders/…` → `/private/var/folders/…`),
- * any symlinked checkout, and Windows path casing. A raw string compare would
- * report a perfectly normal project as "unknown", which is the failure mode
- * this comparison exists to prevent, inverted.
+ * #2573 D5. `git rev-parse HEAD` walks UP from cwd and stops at the FIRST
+ * enclosing `.git`. So the repo that answered is the project's own exactly when
+ * the project root itself carries a `.git` entry — a directory for a normal
+ * clone, a file for a worktree or submodule, both of which `existsSync` accepts.
+ * If it does not, the answer necessarily came from an ancestor repo and the
+ * stamp would assert provenance the project cannot claim.
  *
- * Falls back to a resolved-path compare when realpath cannot answer (a path
- * that does not exist yet), and folds case on Windows only.
+ * Deliberately a filesystem-identity check rather than comparing
+ * `--show-toplevel` against the project root as strings. That comparison is
+ * unreliable across platforms — macOS resolves temp dirs through
+ * `/private/var/…`, Windows adds 8.3 short names and separator/case variance —
+ * and an over-strict compare degrades healthy projects to "unknown", which is
+ * the very failure this check exists to prevent, inverted. No path spelling is
+ * involved here at all.
  */
-function sameRealPath(a: string, b: string): boolean {
-  const norm = (p: string): string => {
-    let resolved: string;
-    try {
-      resolved = fs.realpathSync(path.resolve(p));
-    } catch {
-      resolved = path.resolve(p);
-    }
-    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-  };
-  return norm(a) === norm(b);
+function projectOwnsItsRepo(projectRoot: string): boolean {
+  try {
+    return fs.existsSync(path.join(projectRoot, '.git'));
+  } catch {
+    return false;
+  }
 }
 
 function readGitHeadSha(cwd: string | undefined): string | null {
@@ -1838,21 +1838,18 @@ function readGitHeadSha(cwd: string | undefined): string | null {
   //
   // `--show-toplevel HEAD` answers both in ONE spawn, so pinning costs no extra
   // subprocess on this path (the caller holds the STATE lock).
-  const r = execGit(['rev-parse', '--show-toplevel', 'HEAD'], { cwd });
-  if (r.exitCode !== 0) return null;
-
-  const [topRaw, shaRaw] = r.stdout.trim().split(/\r?\n/);
-  if (!topRaw || !shaRaw) return null;
-
   let projectRoot: string;
   try {
     projectRoot = findProjectRoot(cwd);
   } catch {
-    return null; // cannot prove which repo answered → unknown
+    return null; // cannot prove which repo would answer → unknown
   }
-  if (!sameRealPath(topRaw.trim(), projectRoot)) return null;
+  if (!projectOwnsItsRepo(projectRoot)) return null;
 
-  const sha = shaRaw.trim();
+  const r = execGit(['rev-parse', 'HEAD'], { cwd });
+  if (r.exitCode !== 0) return null;
+
+  const sha = r.stdout.trim();
   return STATE_HEAD_HASH_RE.test(sha) ? sha : null;
 }
 
