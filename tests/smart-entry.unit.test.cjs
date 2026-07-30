@@ -755,8 +755,15 @@ describe('smart-entry: stale_activity honors the template\'s "date — descripti
   // stale. Full ISO instants (not bare dates) are used deliberately: a bare
   // date truncates to UTC midnight, which cannot express limit±1.
   //
-  // NOT fail-first — these pass pre-fix too. They close the [24,95]h band the
-  // property tests skip, so an off-by-one in the threshold cannot land green.
+  // Mixed fail-first status, stated per-case rather than in aggregate: all three
+  // values carry a ` — <description>` suffix, so pre-fix the whole-string
+  // Date.parse returns NaN -> null -> stale=false for every one of them.
+  //   71h expects false -> pre-fix also false -> NOT fail-first.
+  //   72h expects false -> pre-fix also false -> NOT fail-first.
+  //   73h expects true  -> pre-fix false      -> FAIL-FIRST.
+  // Verified by running the pre-fix parser (bare whole-string Date.parse) against
+  // these exact literals. Independently of that, all three close the [24,95]h band
+  // the property tests skip, so an off-by-one in the threshold cannot land green.
   for (const [label, value, expected] of [
     ['71h — one hour inside the window', '2026-07-29T01:00:00Z — 71h ago', false],
     ['72h — exactly at the limit (strict >)', '2026-07-29T00:00:00Z — 72h ago', false],
@@ -832,6 +839,135 @@ describe('smart-entry: stale_activity honors the template\'s "date — descripti
       signals.stale_activity,
       true,
       'CRLF line endings must not change the parsed instant',
+    );
+  });
+
+  // A zone designator the ISO capture cannot absorb — a bare NAME, or an offset
+  // split from the time by whitespace — used to resolve host-TZ-dependently.
+  // Each value below is 2026-07-28T23:30:00Z, i.e. 72.5h before FIXED_NOW, so
+  // the correct instant reads stale=true; misreading 23:30 as local time on a
+  // host west of UTC moves it inside the 72h window and flips to false. That
+  // flip is what makes these behavioral rather than cosmetic.
+  //
+  // THESE ARE FAIL-FIRST — verified by reverting src/smart-entry.cts to base,
+  // rebuilding, and driving the real detectSignals(): all three read stale=false
+  // pre-fix on a UTC-4 host, and stale=true post-fix.
+  for (const [label, value] of [
+    ['space separator + zone name + suffix', '2026-07-28 23:30:00 GMT — did stuff'],
+    ['T separator + zone name + suffix', '2026-07-28T23:30:00 GMT — did stuff'],
+    // Not covered by the pre-existing no-suffix pin above: with the T separator
+    // the WHOLE-STRING parse is itself wrong (V8 honors " GMT" only on the
+    // space-separated legacy form), so this one never reached the fallback.
+    ['T separator + zone name, NO suffix', '2026-07-28T23:30:00 GMT'],
+  ]) {
+    test(`zone designator is honored, not re-read as local: ${label}`, () => {
+      const stateMd = [
+        '---',
+        'status: executing',
+        `last_activity: ${value}`,
+        '---',
+        '',
+        '# Project State',
+        '',
+        'Phase: 1',
+        '',
+      ].join('\n');
+      const dir = track(makeProject({ state: stateMd, roadmap: true }));
+      const signals = detectSignals(dir, FIXED_NOW);
+      assert.equal(
+        signals.stale_activity,
+        true,
+        `${label}: 23:30Z is 72.5h before the fixed clock and must read stale; ` +
+          'reading it as local time shifts the instant by the host UTC offset',
+      );
+    });
+  }
+
+  // NOT fail-first, and deliberately so: pre-fix this value reconstructed to
+  // 23:30 LOCAL (a wrong instant that happens to also read not-stale here), and
+  // post-fix it degrades to null. The boolean is false either way, so this pins
+  // the ADR-227 fail-SAFE contract rather than discriminating a behavior change.
+  // It is still worth keeping: it is the assertion that would catch a future
+  // "helpfully" resolving an ambiguous abbreviation to some default zone.
+  test('an ambiguous zone abbreviation degrades to no-signal, never a guess', () => {
+    const stateMd = [
+      '---',
+      'status: executing',
+      'last_activity: 2026-07-28 23:30:00 EST — did stuff',
+      '---',
+      '',
+      '# Project State',
+      '',
+      'Phase: 1',
+      '',
+    ].join('\n');
+    const dir = track(makeProject({ state: stateMd, roadmap: true }));
+    const signals = detectSignals(dir, FIXED_NOW);
+    assert.equal(
+      signals.stale_activity,
+      false,
+      'EST denotes a different instant per locale and JS resolves it ' +
+        'implementation-defined; ADR-227 requires the safe default, not a guess',
+    );
+  });
+
+  // Design guard for the zone allowlist, NOT fail-first (this passes pre-fix and
+  // must keep passing). The zone probe only runs when a time-of-day was captured
+  // — and a hand-typed value can carry BOTH a time and an ordinary description.
+  // A generic case-insensitive `[A-Z]{2,5}` zone matcher would match "fixed"
+  // here, coerce the value to no-signal, and silently re-break the #2570 class.
+  // The allowlist is what prevents that, so it is pinned.
+  //
+  // The value is deliberately FAR from the 72h boundary. A time carrying no zone
+  // at all is still read as LOCAL (a bare date is UTC — the asymmetry is JS's,
+  // and this fix does not change it), so a near-boundary fixture here would flip
+  // with the host's UTC offset. Distance from the threshold is what keeps this
+  // assertion about zone-vs-description and not about the host's timezone.
+  test('a time plus an ordinary description is not mistaken for a zone', () => {
+    const stateMd = [
+      '---',
+      'status: executing',
+      'last_activity: 2026-07-20 23:00:00 — fixed the bug',
+      '---',
+      '',
+      '# Project State',
+      '',
+      'Phase: 1',
+      '',
+    ].join('\n');
+    const dir = track(makeProject({ state: stateMd, roadmap: true }));
+    const signals = detectSignals(dir, FIXED_NOW);
+    assert.equal(
+      signals.stale_activity,
+      true,
+      'a description after a time must not be read as a timezone abbreviation; ' +
+        'doing so would coerce a parseable value to no-signal',
+    );
+  });
+
+  // FAIL-FIRST: pre-fix `Date.UTC(99, ...)` remapped the year to 1999, so the
+  // round-trip rejected this REAL date as impossible and returned null ->
+  // stale=false. It failed safe, so ADR-227 held, but it over-rejected a real
+  // date, which is the one thing the calendar guard must not do.
+  test('a real 2-digit-looking year is not over-rejected by the calendar guard', () => {
+    const stateMd = [
+      '---',
+      'status: executing',
+      'last_activity: 0099-06-15 — a very old project',
+      '---',
+      '',
+      '# Project State',
+      '',
+      'Phase: 1',
+      '',
+    ].join('\n');
+    const dir = track(makeProject({ state: stateMd, roadmap: true }));
+    const signals = detectSignals(dir, FIXED_NOW);
+    assert.equal(
+      signals.stale_activity,
+      true,
+      'year 0099 is a real calendar year; Date.UTC 2-digit remapping must not ' +
+        'make the guard reject it',
     );
   });
 });

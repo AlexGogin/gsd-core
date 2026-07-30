@@ -187,6 +187,37 @@ const ISO_LEADING_RE =
   /^(\d{4})-(\d{2})-(\d{2})((?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?)/;
 
 /**
+ * A timezone designator sitting immediately after the captured ISO token — the
+ * form `ISO_LEADING_RE` deliberately does NOT absorb (a bare zone NAME, or an
+ * offset separated from the time by whitespace).
+ *
+ * Deliberately an explicit ALLOWLIST rather than a generic `[A-Z]{2,5}`. The
+ * probe runs only when a time-of-day was captured, but a hand-typed
+ * `2026-07-28 14:30 — fixed the bug` DOES carry a time, and a generic
+ * case-insensitive class would match "fixed" and coerce the whole value to
+ * no-signal — re-breaking the #2570 class this fix exists to close. Matching
+ * only real zone tokens leaves ordinary descriptions on the existing path.
+ *
+ * Case-insensitive because `Date.parse`'s legacy parser accepts `utc`/`gmt`
+ * lowercase, so a value it would honor must not be silently dropped here.
+ *
+ * KNOWN RESIDUAL: an abbreviation outside this list (`HST`, `AKST`, ...) is not
+ * recognised, so it falls through to the pre-existing path and can still be
+ * re-read as local. That is no worse than the previous behavior for those
+ * inputs, and widening the list is a pure data change.
+ */
+const TRAILING_ZONE_RE =
+  /^[ \t]*(Z|UTC?|GMT|E[SD]T|C[SD]T|M[SD]T|P[SD]T|BST|CES?T|EES?T|WES?T|JST|KST|IST|MSK|AE[SD]T|AWST|ACST|NZ[SD]T|[+-]\d{2}:?\d{2})\b/i;
+
+/** Zone names that denote UTC exactly. Anything else is host/locale-dependent. */
+const UTC_ZONE_NAMES = new Set(['Z', 'UT', 'UTC', 'GMT']);
+
+/** True when the captured time-of-day already carries its own `Z` or `±HH:MM`. */
+function timeCarriesOffset(time: string): boolean {
+  return /(?:Z|[+-]\d{2}:?\d{2})$/.test(time);
+}
+
+/**
  * True only when y/m/d name a date that actually exists on the calendar.
  *
  * `Date.parse` validates shape but not value: it rolls an out-of-range day
@@ -195,12 +226,20 @@ const ISO_LEADING_RE =
  * propagate a different, wrong instant instead of failing safe — precisely
  * what ADR-227 ("validate shape AND value; on failure of either layer coerce
  * to the contract's safe default, never propagate") exists to prevent. A
- * round-trip through Date.UTC detects the rollover: any component the
- * constructor normalised comes back changed.
+ * round-trip detects the rollover: any component the constructor normalised
+ * comes back changed.
+ *
+ * `setUTCFullYear`, not `Date.UTC`: `Date.UTC` remaps a year in 0..99 to
+ * 1900+year, so `Date.UTC(99, 5, 15)` is 1999 and the round-trip rejected
+ * `0099-06-15` — a REAL date — as impossible. That failed safe (null, not a
+ * wrong instant) so ADR-227's contract held, but it violated this guard's own
+ * "must not over-reject a real date" goal. `setUTCFullYear` applies no such
+ * remap.
  */
 function isRealCalendarDate(year: number, month: number, day: number): boolean {
   if (month < 1 || month > 12 || day < 1 || day > 31) return false;
-  const probe = new Date(Date.UTC(year, month - 1, day));
+  const probe = new Date(0);
+  probe.setUTCFullYear(year, month - 1, day);
   return (
     probe.getUTCFullYear() === year &&
     probe.getUTCMonth() === month - 1 &&
@@ -218,11 +257,42 @@ function parseActivityTimestamp(raw: string | null): number | null {
     // Date.parse substitute a rolled-forward one. null = "no activity signal",
     // the safe default staleActivity already fails open on.
     if (!isRealCalendarDate(Number(year), Number(month), Number(day))) return null;
-    // The date is real, so stay as liberal as before (Postel): a whole-string
-    // parse still wins when the engine can make sense of the value. Reading the
-    // token first would silently DROP a trailing zone name -- "2026-06-08
-    // 12:34:56 GMT" parses whole as 12:34:56Z but as local time from the token,
-    // shifting the instant by the host's UTC offset.
+
+    // A zone designator the ISO capture could not absorb (a bare NAME like
+    // "GMT", or an offset separated from the time by whitespace) is resolved
+    // HERE rather than being left to the whole-string parse, because neither
+    // the whole-string parse nor a token reconstruction handles it correctly:
+    //
+    //   "2026-07-28 23:30:00 GMT"              whole -> 23:30Z   (right)
+    //   "2026-07-28T23:30:00 GMT"              whole -> 03:30Z   (WRONG, host-TZ)
+    //   "2026-07-28 23:30:00 GMT - did stuff"  whole fails; token drops GMT and
+    //                                          re-reads 23:30 as LOCAL (WRONG)
+    //
+    // The T-separator row is the reason the previous "whole-string parse
+    // preserves a trailing zone name" comment was false: V8 honors " GMT" only
+    // on the space-separated legacy form, so identical values disagreed by the
+    // host's UTC offset depending on a separator. Canonicalising to an explicit
+    // `T...Z` makes every zone-bearing shape resolve the same way on every host.
+    const zoneMatch = time && !timeCarriesOffset(time)
+      ? trimmed.slice(iso[0].length).match(TRAILING_ZONE_RE)
+      : null;
+    if (zoneMatch) {
+      const zone = zoneMatch[1].toUpperCase();
+      const canonicalTime = time.replace(/^ /, 'T');
+      if (/^[+-]/.test(zone)) {
+        const offsetMs = Date.parse(`${year}-${month}-${day}${canonicalTime}${zone}`);
+        return Number.isNaN(offsetMs) ? null : offsetMs;
+      }
+      // An abbreviation that is not exactly UTC ("EST", "CEST", ...) denotes a
+      // different instant per locale and JS resolves it implementation-defined.
+      // ADR-227: coerce to the safe default rather than propagate a guess.
+      if (!UTC_ZONE_NAMES.has(zone)) return null;
+      const utcMs = Date.parse(`${year}-${month}-${day}${canonicalTime}Z`);
+      return Number.isNaN(utcMs) ? null : utcMs;
+    }
+
+    // No uncaptured zone: stay as liberal as before (Postel) — a whole-string
+    // parse wins when the engine can make sense of the value.
     const whole = Date.parse(trimmed);
     if (!Number.isNaN(whole)) return whole;
     // Whole-string failed: the value carries a description suffix (#2570).

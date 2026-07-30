@@ -220,4 +220,61 @@ describe('smart-entry stale_activity — properties (#2570)', () => {
       ),
     );
   });
+
+  // (f)/(g) cover the uncaptured-zone branch. The oracle is host-independent by
+  // construction: every generated value names the SAME instant, so the verdict
+  // must not vary with the separator, the spelling of UTC, or the presence of a
+  // description — which is exactly what the pre-fix parser got wrong.
+  test('(f) a UTC-equivalent zone name yields the instant it names, on any host', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('T', ' '),
+        fc.constantFrom('Z', 'UT', 'UTC', 'GMT', 'utc', 'gmt'),
+        descriptionSuffix,
+        fc.integer({ min: 73, max: 8760 }),
+        (sep, zone, suffix, hoursAgo) => {
+          // A zone SPELLING is only ambiguous-looking; all of these are UTC. So
+          // hoursAgo > 72 must read stale regardless of how it was written.
+          const at = new Date(FIXED_NOW() - hoursAgo * HOUR_MS);
+          const ymd = at.toISOString().slice(0, 10);
+          const hms = at.toISOString().slice(11, 19);
+          const spaced = zone === 'Z' ? '' : ' ';
+          const value = `${ymd}${sep}${hms}${spaced}${zone}${suffix}`;
+          const signals = detectSignals(makeProject(value), FIXED_NOW);
+          assert.equal(
+            signals.stale_activity,
+            true,
+            `${JSON.stringify(value)} names an instant ${hoursAgo}h before the ` +
+              'clock and must read stale on every host',
+          );
+        },
+      ),
+    );
+  });
+
+  test('(g) a non-UTC zone abbreviation never yields a timestamp', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('T', ' '),
+        // Abbreviations JS resolves implementation-defined. ADR-227: a value we
+        // cannot resolve exactly must coerce to the safe default, never a guess.
+        fc.constantFrom('EST', 'EDT', 'PST', 'PDT', 'CST', 'CEST', 'BST', 'JST'),
+        descriptionSuffix,
+        fc.integer({ min: 73, max: 8760 }),
+        (sep, zone, suffix, hoursAgo) => {
+          const at = new Date(FIXED_NOW() - hoursAgo * HOUR_MS);
+          const value =
+            `${at.toISOString().slice(0, 10)}${sep}` +
+            `${at.toISOString().slice(11, 19)} ${zone}${suffix}`;
+          const signals = detectSignals(makeProject(value), FIXED_NOW);
+          assert.equal(
+            signals.stale_activity,
+            false,
+            `${JSON.stringify(value)} carries an ambiguous zone; it must degrade ` +
+              'to no-signal rather than resolve to a guessed instant',
+          );
+        },
+      ),
+    );
+  });
 });
