@@ -11288,4 +11288,75 @@ const HEX_RE = /^[0-9a-f]{4,40}$/i;
       'a symlinked project path is the SAME repo — it must resolve, not degrade to unknown');
     assert.strictEqual(r.commits_behind, 0);
   });
+
+  test('(i) a sub_repos workspace resolves to unknown even though it owns its own repo', () => {
+    // #2573 D5, sub_repos flavor. (g) covers the case where the project owns NO
+    // .git. This is the harder one: the outer workspace owns BOTH .planning/ and
+    // its own repo, so projectOwnsItsRepo passes — yet every code commit lands in
+    // a nested child repo and the outer HEAD never advances.
+    //
+    // Pre-fix that stamps the outer HEAD, --is-ancestor passes trivially,
+    // rev-list counts 0, and the tri-state reports commit_stale:false — "known
+    // fresh" — no matter how far the children have moved. That is a WRONG answer,
+    // not a missing one: the same invariant (g) protects, reached by a third
+    // route. docs/CONFIGURATION.md describes sub_repos as scoping work per
+    // sub-repo "instead of treating the outer repo as a monorepo", so an outer
+    // wrapper that is itself a repo is a supported layout, not a contrived one.
+    const outer = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-subrepos-'));
+    propDirs.push(outer);
+    const g = (c) => execSync(c, { cwd: outer, stdio: 'pipe', encoding: 'utf-8' });
+    g('git init -q'); g('git config user.email t@t.com'); g('git config user.name T');
+    g('git config commit.gpgsign false');
+    fs.mkdirSync(path.join(outer, '.planning'), { recursive: true });
+    fs.writeFileSync(
+      path.join(outer, '.planning', 'config.json'),
+      JSON.stringify({ planning: { sub_repos: ['frontend'] } }, null, 2),
+    );
+    fs.writeFileSync(path.join(outer, 'wrapper.txt'), 'x\n');
+    g('git add -A && git commit -q -m outer');
+    const outerHead = g('git rev-parse HEAD').trim();
+
+    // A separately tracked child repo — where the real work happens. The outer
+    // repo is deliberately NOT advanced past `outerHead` afterwards, which is
+    // precisely the topology that makes the stale reading look fresh.
+    const child = path.join(outer, 'frontend');
+    fs.mkdirSync(child, { recursive: true });
+    const gc = (c) => execSync(c, { cwd: child, stdio: 'pipe', encoding: 'utf-8' });
+    gc('git init -q'); gc('git config user.email t@t.com'); gc('git config user.name T');
+    gc('git config commit.gpgsign false');
+    fs.writeFileSync(path.join(child, 'app.js'), 'let a = 1;\n');
+    gc('git add -A && git commit -q -m child');
+
+    const r = readStateHeadFreshness(outer, outerHead);
+    assert.strictEqual(r.commit_stale, null,
+      'a sub_repos workspace cannot substantiate a freshness claim from the outer ' +
+      'HEAD — it must report unknown, never false ("known fresh")');
+    assert.strictEqual(r.commits_behind, null,
+      'a distance measured against the wrapper repo is not a meaningful count');
+  });
+
+  test('(j) a plain single-repo project is NOT degraded by the sub_repos check', () => {
+    // Over-tightening guard for (i), mirroring what (h) does for (g). An empty or
+    // absent sub_repos must leave the normal path untouched — a check that
+    // degraded every project to unknown would "pass" (i) while destroying the
+    // feature, which is the failure mode this pins.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2573-plain-'));
+    propDirs.push(dir);
+    const g = (c) => execSync(c, { cwd: dir, stdio: 'pipe', encoding: 'utf-8' });
+    g('git init -q'); g('git config user.email t@t.com'); g('git config user.name T');
+    g('git config commit.gpgsign false');
+    fs.mkdirSync(path.join(dir, '.planning'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.planning', 'config.json'),
+      JSON.stringify({ planning: { sub_repos: [] } }, null, 2),
+    );
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'a\n');
+    g('git add -A && git commit -q -m base');
+    const head = g('git rev-parse HEAD').trim();
+
+    const r = readStateHeadFreshness(dir, head);
+    assert.strictEqual(r.commit_stale, false,
+      'an empty sub_repos list is a normal single-repo project — it must resolve');
+    assert.strictEqual(r.commits_behind, 0);
+  });
 });

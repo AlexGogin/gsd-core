@@ -1837,6 +1837,15 @@ function readGitHeadSha(cwd: string | undefined): string | null {
   // relationship to, and report `commit_stale: false` ("known fresh") while
   // doing it. Unverified provenance must degrade to unknown, never to fresh.
   //
+  // TWO independent conditions must hold before a stamp is trustworthy, and both
+  // are checked below because either alone is insufficient:
+  //   1. the project root owns a `.git` (else an ancestor repo answered), and
+  //   2. the project is not a `sub_repos` workspace (else the repo that answers
+  //      is the outer wrapper, whose HEAD does not move when the code does).
+  // KNOWN LIMITATION, by design: in a `sub_repos` workspace this feature reports
+  // unknown rather than measuring the children. Per-child freshness needs a
+  // defined aggregate across N histories and is out of scope for this increment.
+  //
   // `--show-toplevel HEAD` answers both in ONE spawn, so pinning costs no extra
   // subprocess on this path (the caller holds the STATE lock).
   let projectRoot: string;
@@ -1846,6 +1855,31 @@ function readGitHeadSha(cwd: string | undefined): string | null {
     return null; // cannot prove which repo would answer → unknown
   }
   if (!projectOwnsItsRepo(projectRoot)) return null;
+
+  // #2573 D5, sub_repos flavor. Owning a `.git` is necessary but NOT sufficient.
+  // In a `planning.sub_repos` workspace the outer directory can legitimately own
+  // BOTH `.planning/` and its own repo while every code commit lands in a nested
+  // child repo — `docs/CONFIGURATION.md` describes sub_repos as scoping work per
+  // sub-repo "instead of treating the outer repo as a monorepo". The outer HEAD
+  // then never advances, so `merge-base --is-ancestor` passes trivially and
+  // `rev-list` counts 0: the stamp would report `commit_stale: false`, i.e.
+  // "known fresh", while the code it describes has moved arbitrarily far.
+  //
+  // That is a WRONG answer, not a missing one, and it is the same invariant the
+  // ancestor-repo check above exists to protect: a freshness claim the project
+  // cannot substantiate must degrade to unknown, never to fresh. Measuring the
+  // children instead would mean picking one HEAD out of N unrelated histories
+  // (or inventing an aggregate), which is a design question beyond this
+  // increment — so this scopes to the honest tri-state and declines to answer.
+  // Deliberately keyed on the DECLARED config rather than probing the filesystem
+  // for nested `.git` entries: the declaration is what the workspace asserts
+  // about itself, and a probe would spuriously fire on a vendored dependency.
+  try {
+    const subRepos = (loadConfig(projectRoot) as { sub_repos?: unknown }).sub_repos;
+    if (Array.isArray(subRepos) && subRepos.length > 0) return null;
+  } catch {
+    return null; // cannot read the layout → cannot claim provenance → unknown
+  }
 
   const r = execGit(['rev-parse', 'HEAD'], { cwd });
   if (r.exitCode !== 0) return null;
