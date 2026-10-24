@@ -1129,15 +1129,29 @@ function cmdPhasePlanIndex(cwd: string, phase: string, raw: boolean): void {
     }
 
     const computedWave = (level.get(rawPlan.id) ?? 0) + levelOffset;
-    const effectiveWave = computedWave;
+    // #decimal-waves: a DECLARED decimal child wave (`wave: 2.1`) is
+    // honored as its own wave — emitted as the Number 2.1, ordered and
+    // grouped between 2 and 3. The DAG computes integer levels only, so
+    // without this a `wave: 2.1` plan landed in the parent wave (the
+    // parseInt collapse) and the declared ordering was lost. Declared
+    // INTEGER waves keep the DAG-computed value exactly as before
+    // (byte-identical integer behavior).
+    const declared = rawPlan.declaredWave;
+    const effectiveWave = declared !== null && !Number.isInteger(declared)
+      ? declared
+      : computedWave;
     // #3427 (D5/N3): suppress the wave-mismatch verdict for a plan that has
     // at least one unresolved depends_on token — its own dropped-edge
     // warning above already explains the degraded wave placement, so the
     // mismatch here would blame the author for a DAG the tool itself
     // couldn't build. A plan with NO unresolved tokens still gets a genuine
     // mismatch reported (N3, T25) — the suppression is per-plan, never blanket.
+    // #decimal-waves: a declared child wave never matches an integer DAG
+    // level by construction — comparing them would always fire; the child
+    // wave IS the declared ordering, so the mismatch check is skipped for it.
     if (
       rawPlan.declaredWave !== null &&
+      Number.isInteger(rawPlan.declaredWave) &&
       rawPlan.declaredWave !== computedWave &&
       !plansWithUnresolvedTokens.has(rawPlan.id)
     ) {

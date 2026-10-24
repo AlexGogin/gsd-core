@@ -31,6 +31,7 @@ import { tokenizeHeadings } from './markdown-sectionizer.cjs';
 import { escapeCell, findTableWithColumns, updateTableCell } from './markdown-table.cjs';
 import { clampPercent } from './phase-lifecycle.cjs';
 import { platformWriteSync } from './shell-command-projection.cjs';
+import { waveKeyOrDefault, formatWaveKey } from './wave-key.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
 const { planningPaths, withPlanningLock, findContextMdIn, resolvePhaseIdConvention } = planningWorkspace;
@@ -1822,7 +1823,9 @@ function cmdRoadmapAnnotateDependencies(cwd: string, phaseNum: string | null | u
     try {
       const content = fs.readFileSync(planPath, 'utf-8');
       const fm = extractFrontmatter(content, planPath);
-      const wave = parseInt(fm.wave as string, 10) || 1;
+      // Decimal child waves (#decimal-waves): parse `wave: 2.1` as the distinct
+      // value 2.1 (shared wave key), not the parseInt collapse onto 2.
+      const wave = waveKeyOrDefault(fm.wave, 1);
       const planId = planFile.replace(/-PLAN\.md$/i, '').replace(/PLAN\.md$/i, '');
       const truths = parseMustHavesBlock(content, 'truths') || [];
       planData.push({ planFile, planId, wave, truths });
@@ -1845,6 +1848,9 @@ function cmdRoadmapAnnotateDependencies(cwd: string, phaseNum: string | null | u
     if (!waveGroups.has(p.wave)) waveGroups.set(p.wave, []);
     waveGroups.get(p.wave)!.push(p);
   }
+  // #decimal-waves: numeric sort keeps 2 < 2.1 < 3 — child waves never
+  // interleave with their parent. Plain numeric keys (the wave key's numeric
+  // projection) sort identically to the former `(a, b) => a - b` on integers.
   const waves = [...waveGroups.keys()].sort((a, b) => a - b);
 
   // Find cross-cutting truths: appear in 2+ plans (de-duplicated, case-insensitive).
@@ -1971,6 +1977,8 @@ function cmdRoadmapAnnotateDependencies(cwd: string, phaseNum: string | null | u
     }
 
     const annotatedLines: string[] = [];
+    // #decimal-waves: numeric sort keeps headers 2 < 2.1 < 3; the header text
+    // prints the numeric key directly (2.1 prints as `Wave 2.1`).
     const sortedWaves = [...linesByWave.keys()].sort((a, b) => a - b);
     for (let i = 0; i < sortedWaves.length; i++) {
       const w = sortedWaves[i];

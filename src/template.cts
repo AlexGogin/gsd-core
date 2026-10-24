@@ -12,6 +12,7 @@ import { realClock } from './clock.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import ioMod = require('./io.cjs');
 const { output, error } = ioMod;
+import { waveKeyOrDefault } from './wave-key.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import coreUtilsMod = require('./core-utils.cjs');
 const { toPosixPath, generateSlugInternal } = coreUtilsMod;
@@ -170,7 +171,11 @@ function cmdTemplateFill(cwd: string, templateType: string | null | undefined, o
     }
     case 'plan': {
       const planType = options.type || 'execute';
-      const wave = parseInt(String(options.wave), 10) || 1;
+      // #decimal-waves: `--wave 2.1` must survive into the generated frontmatter
+      // as the distinct value 2.1 — the former parseInt collapsed it onto 2.
+      // Parse via the shared wave key and emit its numeric projection
+      // (integer `1` default preserved for absent/invalid, as before).
+      const wave = waveKeyOrDefault(options.wave, 1);
       frontmatterObj = {
         phase: phaseId,
         plan: planNum,

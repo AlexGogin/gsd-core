@@ -13,6 +13,7 @@ import { textEncodingError } from './validate.cjs';
 import { tryWithinRootLexical } from './security.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- planning-workspace.cjs is an export= CommonJS module
 import planningWorkspace = require('./planning-workspace.cjs');
+import { waveKeyOrDefault, waveKeyExceedsOne } from './wave-key.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- frontmatter.cjs is an export= CommonJS module
 import frontmatterMod = require('./frontmatter.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- state.cjs is an export= CommonJS module
@@ -1381,7 +1382,7 @@ function cmdVerifyPlanStructure(cwd: string, filePath: string, raw: boolean): vo
 
   if (
     fm['wave'] &&
-    parseInt(fm['wave'] as string) > 1 &&
+    waveKeyExceedsOne(fm['wave']) &&
     (!fm['depends_on'] ||
       (Array.isArray(fm['depends_on']) && (fm['depends_on'] as unknown[]).length === 0))
   ) {
@@ -1757,7 +1758,10 @@ function collectPromisedFilesAtOrAfterWave(phaseDir: string, minWave: number): {
     const planContent = planRead.value;
     const fm = extractFrontmatter(planContent, planFullPath);
     const waveRaw = fm['wave'];
-    const wave = typeof waveRaw === 'string' ? parseInt(waveRaw, 10) : (typeof waveRaw === 'number' ? waveRaw : NaN);
+    // #decimal-waves: parse `wave: 2.1` as 2.1 (shared wave key) — the former
+    // parseInt collapsed it onto 2, letting a child wave's promised files leak
+    // into a `wave >= minWave` scan one wave early.
+    const wave = waveKeyOrDefault(waveRaw, NaN);
     if (isNaN(wave) || wave < minWave) continue;
     const filesModified = fm['files_modified'];
     if (!filesModified) continue;
@@ -1798,9 +1802,9 @@ function cmdVerifyKeyLinks(cwd: string, planFilePath: string, raw: boolean): voi
   // missing-file handling (fix #1202).
   const currentFm = extractFrontmatter(content, fullPath);
   const currentWaveRaw = currentFm['wave'];
-  const currentWave = typeof currentWaveRaw === 'string'
-    ? parseInt(currentWaveRaw, 10)
-    : (typeof currentWaveRaw === 'number' ? currentWaveRaw : 1);
+  // #decimal-waves: same shared-key parse as collectPromisedFilesAtOrAfterWave —
+  // `wave: 2.1` is 2.1, not the parseInt collapse onto 2.
+  const currentWave = waveKeyOrDefault(currentWaveRaw, 1);
   const phaseDir = path.dirname(fullPath);
 
   // Collect files promised by plans at wave >= currentWave (lazy: computed once

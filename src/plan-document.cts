@@ -50,6 +50,7 @@
 // for the full reasoning.
 import { readFrontmatterFieldsFromSource } from './planning-document.cjs';
 import type { NodeRead } from './planning-document.cjs';
+import { parseWaveKey, waveKeyToNumber } from './wave-key.cjs';
 
 // ─── Frozen vocabularies ──────────────────────────────────────────────────────
 
@@ -387,8 +388,12 @@ function parsePlanDocument(content: string, _planPath = ''): PlanDocument {
   // shares this SAME parsed result.
   const fields = readFrontmatterFieldsFromSource(content, FRONTMATTER_READ_KEYS);
 
-  const parsedWave = parseInt(frontmatterField(fields, 'wave') as string, 10);
-  const declaredWave = Number.isNaN(parsedWave) ? null : parsedWave;
+  // Decimal child waves (#decimal-waves): `wave: 2.1` must reach consumers as
+  // the distinct value 2.1 — the former parseInt collapsed it onto 2. Parse
+  // through the shared wave key (int + frac tuple) and emit its numeric
+  // projection; unparseable stays null exactly as NaN did before.
+  const waveKey = parseWaveKey(frontmatterField(fields, 'wave') as unknown as string);
+  const declaredWave = waveKey === null ? null : waveKeyToNumber(waveKey);
 
   let dependsOn: string[] = [];
   const fmDeps = frontmatterField(fields, 'depends_on');
