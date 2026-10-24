@@ -356,6 +356,8 @@ Parse JSON for: `phase`, `plans[]`, `waves`, `incomplete`, `runnable`, `ready_pl
 
 **Wave safety check:** If `WAVE_FILTER` is set and there are still incomplete plans in any lower wave that match the current execution mode, STOP and tell the user to finish earlier waves first. Do not let Wave 2+ execute while prerequisite earlier-wave plans remain incomplete.
 
+**Decimal child waves (mid-phase replans).** `WAVE_FILTER` accepts decimal child-wave values: `--wave 2.1` selects the child wave `2.1` and nothing else. `--wave 2` does NOT capture plans of wave 2.1 — a child wave is its own wave, ordered strictly between its parent (2) and the successor integer wave (3). The wave safety check is parent-inclusive: wave N is not closable while any N.x child-wave plan lacks a SUMMARY, and a child wave N.x is never dispatched while its parent wave N has incomplete plans. The earliest open (wave, subwave) pair wins selection. See `execute-phase/steps/ready-wave-gate.md` §3 for the closure rule.
+
 **If all filtered — do NOT exit unconditionally (#2868).** "No plan work left" and "phase fully
 done" are different conditions: a run can be interrupted between the final wave's SUMMARY and
 `verify_phase_goal` (most commonly by a checkpoint plan that is retired but still writes a SUMMARY),

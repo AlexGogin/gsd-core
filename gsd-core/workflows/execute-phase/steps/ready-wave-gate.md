@@ -35,3 +35,20 @@ This ordering is fail-closed: a later wave is never selected while any
 predecessor is incomplete, because a ready plan's own dependencies are
 complete by construction — anything not ready is reported and the run stops
 at the waiting condition.
+
+**Decimal child waves (mid-phase replans).** A plan whose frontmatter declares
+a decimal wave (`wave: 2.1`) is a CHILD WAVE of wave 2: it is ordered strictly
+between wave 2 and wave 3, selected and executed only after every wave-2 plan
+is complete, and never collapsible into its parent (the index reports it as
+its own wave; `--wave 2` does not capture it, `--wave 2.1` selects only it).
+
+> 3. **Child-wave closure rule** — wave N is not closable while any N.x child
+> plan lacks a SUMMARY, and a child wave N.x is not closable while its parent
+> wave N has incomplete plans. When choosing the wave to dispatch, the
+> earliest open (wave, subwave) pair wins: with 2 incomplete and 2.1
+> incomplete, wave 2 is dispatched first; when 2 completes and 2.1 remains,
+> 2.1 is the earliest open wave. `--wave` accepts decimal values (`--wave 2.1`).
+
+This is fail-closed for the same reason as the ordering above: a child wave
+can never be selected before its parent completes, and the parent can never
+report complete while a replan inserted into it is still open.
