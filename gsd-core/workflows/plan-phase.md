@@ -355,7 +355,13 @@ If `stale_artifacts` is empty, continue silently to §5 — nothing to report.
 If `section_manifest` is `null` or `"research-only-modifiers"` is in its `included` list: read and execute `gsd-core/workflows/plan-phase/steps/research-only-modifiers.md`. Otherwise skip — do not read the file.
 <!-- /gsd:section -->
 
-### 5.1. Standard Research Decision
+### 5.1. Standard Research Decision (strict profile)
+
+Research is **required** in the phase loop. Rationale: the dispatch guard enforces a RESEARCH.md artifact on disk as a precondition for spawning gsd-planner (process-order gate), so skipping research here guarantees the planner dispatch is blocked later. Research is skipped ONLY in these named cases:
+
+a) `has_research` is true (from init) AND no `--research` flag → use the existing RESEARCH.md, skip to step 6 (re-use, unchanged below).
+b) `--gaps` / `--reviews` / `--skip-research` flag modes (step 5 header) — those are their own workflows, not the phase loop.
+c) An explicit human decision recorded in the phase CONTEXT.md naming research as deliberately skipped for this phase (a named exception, not a silent default).
 
 **Skip if** `RESEARCH_ONLY=true` (the research-only mode in 5.0 already determined the path: spawn or exit). Without this guard, an LLM following the workflow could fall through into "use existing, skip to step 6" → planner spawn, violating the research-only contract. **CR #3045 finding: this gate makes the early-exit unreachable from any non-research-only branch.**
 
@@ -363,37 +369,7 @@ If `section_manifest` is `null` or `"research-only-modifiers"` is in its `includ
 
 **If RESEARCH.md missing OR `--research` flag:**
 
-**If no explicit flag (`--research` or `--skip-research`) and not `--auto`:**
-Ask the user whether to research, with a contextual recommendation based on the phase:
-
-If `TEXT_MODE` is true, present as a plain-text numbered list:
-```
-Research before planning Phase {X}: {phase_name}?
-
-1. Research first (Recommended) — Investigate domain, patterns, and dependencies before planning. Best for new features, unfamiliar integrations, or architectural changes.
-2. Skip research — Plan directly from context and requirements. Best for bug fixes, simple refactors, or well-understood tasks.
-
-Enter number:
-```
-
-Otherwise use AskUserQuestion:
-```
-AskUserQuestion([
-  {
-    question: "Research before planning Phase {X}: {phase_name}?",
-    header: "Research",
-    multiSelect: false,
-    options: [
-      { label: "Research first (Recommended)", description: "Investigate domain, patterns, and dependencies before planning. Best for new features, unfamiliar integrations, or architectural changes." },
-      { label: "Skip research", description: "Plan directly from context and requirements. Best for bug fixes, simple refactors, or well-understood tasks." }
-    ]
-  }
-])
-```
-
-If user selects "Skip research": skip to step 6.
-
-**If `--auto` and `research_enabled` is false:** Skip research silently (preserves automated behavior).
+Research is mandatory here. Do NOT offer a "skip research" choice in the phase loop, and `--auto` does NOT skip research silently (the old `research_enabled=false` silent skip is removed from the phase loop; the lawful skips are (a)–(c) above). The quick/fast workflows are separate entry points and are not affected by this rule.
 
 Display banner:
 ```
