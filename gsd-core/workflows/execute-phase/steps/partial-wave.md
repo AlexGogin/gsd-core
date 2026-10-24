@@ -29,3 +29,27 @@ Selected wave finished successfully. This phase still has incomplete plans, so p
 - continue with the normal phase-level verification and completion flow below
 - this means the selected wave happened to be the last remaining work in the phase
 </step>
+
+**Mid-phase replan transition (blocker → child wave N.1 → wave N+1).** When a
+wave's execution uncovers a blocker that the existing plans do not cover (all
+tasks done, outcome not achieved, a gap no current plan addresses), do NOT
+route around it with a quick task or a tail-of-queue wave — replan INTO the
+phase as a decimal child wave:
+
+1. STOP execution at the uncovered blocker. Report it; do not improvise fixes
+   beyond the executor's deviation rules.
+2. Run `/gsd-plan-phase {phase} --gaps`. The PLANNER (never the executor)
+   authors the gap plans as child-wave plans: frontmatter `wave: N.1`, where N
+   is the wave whose execution uncovered the blocker, plus
+   `gap_closure: true` — the marker that the plan was born from a blocker.
+3. The plan-checker round runs on the new plans as usual (they are ordinary
+   plans; decimal waves carry no check exemption).
+4. Execute the child wave: `/gsd-execute-phase {phase} --wave N.1`. The child
+   wave is ordered strictly after wave N and before wave N+1; wave N is not
+   closable while any N.x plan lacks a SUMMARY (see
+   `execute-phase/steps/ready-wave-gate.md` §3).
+5. Only when every N.x plan has a SUMMARY does execution proceed to wave N+1.
+
+The transition is the formal shape of "wave N closed ⇔ N.1 closed": the
+parent wave absorbs its children for closure purposes, so a mid-phase replan
+never reorders the tail of the phase.
