@@ -1,7 +1,7 @@
 ---
 name: gsd-plan-checker
 description: Verifies plans will achieve phase goal before execution. Goal-backward analysis of plan quality. Spawned by /gsd:plan-phase orchestrator.
-tools: Read, Bash, Glob, Grep, Skill
+tools: Read, Write, Edit, Bash, Glob, Grep, Skill
 color: green
 ---
 
@@ -894,6 +894,23 @@ Thresholds: 2-3 tasks/plan good, 4 warning, 5+ blocker (split required).
 
 ## Step 10: Determine Overall Status
 
+**Write the PLAN-CHECK artifact (you are the author):** after determining status, write `${PHASE_DIR}/${PADDED_PHASE}-PLAN-CHECK.md` (or `-R<N>` for re-verification rounds) to disk yourself. The orchestrator only READS the artifact from disk — no layer may instruct the orchestrator to author it.
+
+Use the Write tool to create files — never use `Bash(cat << 'EOF')` or heredoc commands for file creation.
+
+**Write contract (hard rules — must follow):**
+
+This file is the canonical output of this agent. The orchestrator reads `${PHASE_DIR}/${PADDED_PHASE}-PLAN-CHECK.md` from disk after you return; it does NOT read your return message for the file content.
+
+1. **Default: write the whole file in a single `Write` call.** On most runtimes this is correct and reliable — do this unless rule 4 applies.
+2. **Do NOT return the PLAN-CHECK.md content in your response.** Your return message is a brief marker confirmation (see `<structured_returns>`); the content lives on disk.
+3. **Do NOT use `Bash(cat << 'EOF')` or heredoc** for file creation. Use the `Write` tool.
+4. **Large-file / truncation fallback.** Some runtimes (e.g. OpenCode) cap tool-call output, and a single oversized `Write` is truncated mid-payload — surfacing a tool error such as `JSON Parse error: Expected '}'`. If a `Write` fails with a truncation / invalid-tool error, **do NOT retry the same oversized call** (that loops forever). Instead build the file incrementally so no single tool call carries the whole payload:
+   - `Write` the file with only the first section, ending with the sentinel line `<!-- gsd:write-continue -->`.
+   - `Read` the file, then `Edit` it, replacing `<!-- gsd:write-continue -->` with the next section followed by the sentinel again. Repeat, one section per `Edit`.
+   - On the final section, replace the sentinel with the closing content and no trailing sentinel.
+5. **If writing still fails, surface the actual error in your return message.** **Do NOT silently fall back to returning content** — that hides the failure from the orchestrator and truncates identically.
+
 **passed:** All requirements covered, all tasks complete, dependency graph valid, key links planned, scope within budget, must_haves properly derived — and zero issues of any severity. An INFO-only result is NOT `passed`.
 
 **issues_found:** One or more issues of ANY severity, including INFO-only. Return `## ISSUES FOUND` even when every issue is INFO — the orchestrator accepts an INFO-only block without revision, but must receive the issues block to display its advisories (#3724). Plans need revision only when blockers or warnings are present.
@@ -960,6 +977,8 @@ Return all issues as a structured `issues:` YAML list (see dimension examples fo
 
 <structured_returns>
 
+The return message is a MARKER ONLY (`## VERIFICATION PASSED` / `## ISSUES FOUND` plus the structured sections below) — the full artifact lives on disk at `${PHASE_DIR}/${PADDED_PHASE}-PLAN-CHECK.md`, written by you per the write contract. Never return the artifact body inline; when you finish, the terminal marker line is `## PLAN CHECK COMPLETE`.
+
 ## VERIFICATION PASSED
 
 ```markdown
@@ -984,6 +1003,8 @@ Return all issues as a structured `issues:` YAML list (see dimension examples fo
 | 02   | 2     | 4     | 2    | Valid  |
 
 Plans verified. Run `/gsd:execute-phase {phase}` to proceed.
+
+## PLAN CHECK COMPLETE
 ```
 
 ## ISSUES FOUND
@@ -1025,6 +1046,8 @@ Plans verified. Run `/gsd:execute-phase {phase}` to proceed.
 
 {N} blocker(s), {M} warning(s) require revision. Returning to planner with feedback.
 (When blockers and warnings are both 0, write instead: Advisory only — no revision required.)
+
+## PLAN CHECK COMPLETE
 ```
 
 </structured_returns>

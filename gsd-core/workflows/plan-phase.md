@@ -461,16 +461,14 @@ In that case: **skip validation-strategy creation entirely**. Do **not** expect 
 grep -l "## Validation Architecture" "${PHASE_DIR}"/*-RESEARCH.md 2>/dev/null || true
 ```
 
-**If found:**
-1. Read template: `~/.claude/gsd-core/templates/VALIDATION.md`
-2. Write to `${PHASE_DIR}/${PADDED_PHASE}-VALIDATION.md` (use Write tool)
-3. Fill frontmatter: `{N}` → phase number, `{phase-slug}` → slug, `{date}` → current date
-4. Verify:
+**If found:** the VALIDATION.md file is the researcher's artifact (Step 6.5 of its contract) — the researcher wrote `${PHASE_DIR}/${PADDED_PHASE}-VALIDATION.md` from the template when it wrote RESEARCH.md. The orchestrator does NOT write this file; it only verifies presence:
+
 ```bash
 test -f "${PHASE_DIR}/${PADDED_PHASE}-VALIDATION.md" && echo "VALIDATION_CREATED=true" || echo "VALIDATION_CREATED=false"
 ```
-5. If `VALIDATION_CREATED=false`: STOP — do not proceed to Step 6
-6. If `commit_docs`: `commit "docs(phase-${PHASE}): add validation strategy"`
+
+1. If `VALIDATION_CREATED=true`: continue to Step 6 (the researcher also committed it when `commit_docs` is set — do not commit again).
+2. If `VALIDATION_CREATED=false`: STOP — do not proceed to Step 6, and do NOT write the file yourself. Re-dispatch `gsd-phase-researcher` with the instruction to materialize `${PADDED_PHASE}-VALIDATION.md` per Step 6.5 of its contract (read template → Write → fill frontmatter), then re-verify presence.
 
 **If not found:** Warn and continue — plans may fail Dimension 8.
 
