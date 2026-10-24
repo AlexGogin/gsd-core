@@ -1,0 +1,49 @@
+{
+  "id": "docs-sync",
+  "role": "feature",
+  "version": "1.18.0",
+  "title": "Project docs sync",
+  "description": "Project document registry sync at phase close: the verifier answers the two docs-sync control questions against the project document registry and records per-document outcomes in a Docs sync section of VERIFICATION.md.",
+  "tier": "full",
+  "requires": [],
+  "engines": {
+    "gsd": ">=1.6.0"
+  },
+  "runtimeCompat": {
+    "supported": [
+      "*"
+    ],
+    "unsupported": []
+  },
+  "skills": [
+    "docs-sync"
+  ],
+  "agents": [],
+  "hooks": [],
+  "config": {
+    "workflow.docs_sync": {
+      "type": "boolean",
+      "default": true,
+      "description": "At verify:post, instruct the verifier to sync project documents against the project document registry (canonically .planning/PROJECT-DOCS.md, or the project's own document index): answer the two control questions (did the phase change the operational surface; which cross-cutting topic did it work through), then record one line per touched registry document in a '## Docs sync' section of VERIFICATION.md — 'updated (commit X)' or 'not required (reason)'. The registry is an open list: a new cross-cutting topic means creating the document AND appending a registry row in the same commit. The step is advisory at the workflow level (onError: continue); the 'phase is not closed without Docs sync' enforcement stays a project-process rule carried by the step text."
+    }
+  },
+  "steps": [
+    {
+      "point": "verify:post",
+      "ref": {
+        "skill": "docs-sync"
+      },
+      "produces": [
+        "VERIFICATION.md docs-sync section"
+      ],
+      "consumes": [
+        "SUMMARY.md",
+        "PROJECT-DOCS.md"
+      ],
+      "when": "workflow.docs_sync",
+      "onError": "continue"
+    }
+  ],
+  "contributions": [],
+  "gates": []
+}
