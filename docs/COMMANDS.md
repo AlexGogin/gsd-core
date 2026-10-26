@@ -496,7 +496,7 @@ Archive milestone, tag release.
 **Prerequisites:** Milestone audit complete (recommended)
 **Produces:** `MILESTONES.md` entry, git tag
 
-> **Note:** for the project's first milestone this command is also the identity *registration* — the version and name come from the argument you pass, because nothing recorded them at `/gsd-new-project` time ([the first milestone is implicit](USER-GUIDE.md#the-implicit-first-milestone)). From the second milestone onward, `/gsd-new-milestone` records the identity at cycle start instead.
+> **Note:** for the project's first milestone this command is also the identity *registration* — the version comes from the `<version>` argument, the name from the separate `--name` value the workflow passes alongside it, because nothing recorded them at `/gsd-new-project` time ([the first milestone is implicit](USER-GUIDE.md#the-implicit-first-milestone)). From the second milestone onward, `/gsd-new-milestone` records the identity at cycle start instead.
 
 ```bash
 /gsd-complete-milestone

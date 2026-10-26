@@ -142,25 +142,6 @@ See [Your first project](tutorials/your-first-project.md).
 
 For onboarding an existing codebase before starting a new milestone, run `/gsd-onboard` or see [Onboarding an existing codebase](tutorials/onboarding-an-existing-codebase.md).
 
-### The implicit first milestone
-
-`/gsd-new-project` does not register a milestone. On a fresh project there is no
-`MILESTONES.md`, no `milestone:` value in `STATE.md`, and no version token in
-`ROADMAP.md` — by design (ADR-3180 §7.2 rule 5): a ROADMAP with no version token
-has no milestone identity, and the runtime must not invent one.
-
-The first milestone is therefore **implicit**: it is "everything between
-`/gsd-new-project` and the first `/gsd-complete-milestone <version>`". Its
-identity — version, name, dates — is recorded only at close time, from the
-version you pass to `/gsd-complete-milestone`. There is no start-registration
-step to look for, and none is needed; `/gsd-new-milestone` (the cycle opener)
-exists only from the second milestone onward, where it reads the previous
-version from `MILESTONES.md`.
-
-Until the first close, tooling that reports a current milestone (for example
-`gsd_run query init.manager` on a fresh project) reports `current_milestone:
-null` — this is the documented state, not data loss.
-
 **Relevant flags at a glance:**
 
 | Flag | Command | When to use |
@@ -173,6 +154,28 @@ null` — this is the documented state, not data loss.
 | `--draft` | `/gsd-ship` | Create a draft PR instead of a ready-for-review one |
 
 For the full command reference with all flags, see [`docs/COMMANDS.md`](COMMANDS.md). For configuration options (model profiles, workflow agents, git branching), see [`docs/CONFIGURATION.md`](CONFIGURATION.md).
+
+### The implicit first milestone
+
+`/gsd-new-project` does not register a milestone. On a fresh project there is no
+`MILESTONES.md`, no `milestone:` value in `STATE.md`, and no version token in
+`ROADMAP.md` — by design (ADR-3180 §7.2 rule 5): a ROADMAP with no version token
+has no milestone identity, and the runtime must not invent one.
+
+The first milestone is therefore **implicit**: it is "everything between
+`/gsd-new-project` and the first `/gsd-complete-milestone <version>`". Its
+identity is recorded only at close time — the version from the command
+argument, the name from the separate `--name` value the close workflow passes
+alongside it (defaulting to the version when no name is given). There is no
+start-registration step to look for, and none is needed; `/gsd-new-milestone`
+(the cycle opener) exists only from the second milestone onward, where it reads
+the previous version from `MILESTONES.md` and records the new identity at cycle
+start.
+
+Until the first close, the milestone-aware commands report no current
+milestone: `gsd_run query init.manager` emits `milestone_version: null` and
+`milestone_name: null`, and `gsd_run query init.new-milestone` emits
+`current_milestone: null` — the documented state, not data loss.
 
 ---
 
